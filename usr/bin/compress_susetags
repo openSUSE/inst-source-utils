@@ -1,0 +1,48 @@
+#!/usr/bin/perl
+
+use strict;
+use File::stat;
+
+my $rsyncable = "";
+
+my $arg = shift @ARGV;
+my $tmpdir = `mktemp -d /tmp/mk_listings.XXXXXX`;
+chomp ($tmpdir);
+if ( $arg ) {
+    die("need an argument") unless ( -d $arg );
+}
+
+if ( $arg !~ /^\// ) {
+    my $pwd = `pwd`;
+    chomp ($pwd);
+    $arg = "$pwd/$arg";
+}
+
+system (`touch "$tmpdir/fff"`);
+system (`gzip -f --rsyncable "$tmpdir/fff" >/dev/null 2>/dev/null`);
+if ( -f "$tmpdir/fff.gz" ) {
+    $rsyncable = "--rsyncable";
+}
+system (`rm -f "$tmpdir/fff" "$tmpdir/fff.gz"`);
+
+for my $packfile (glob("$arg/packages*"),glob("$arg/*.pat")) {
+    next if ( $packfile !~ /^[A-Z0-9\-\._]*$/i );
+    next unless ( -f "$packfile" || -l "$packfile" );
+    next if ( $packfile =~ /\.gz$/ );
+    if ( -l "$packfile" ) {
+	my $l = `readlink $packfile`;
+	chomp ($l);
+	next if ( $packfile =~ /\.gz$/ );
+	$l .= ".gz" unless ( $l =~ /\.gz$/ );
+	system ("rm", "-f", $packfile );
+        system ("ln", "-s", "-f", $l, $packfile.'.gz');
+	next;
+    }
+    system ("gzip", "-f", "-9", $rsyncable, $packfile);
+}
+
+system("rm", "-r", "-f", $tmpdir);
+system("rm", "-f", "$arg/patterns");
+chdir($arg);
+system("ls *.pat *.pat.gz > patterns 2>/dev/null");
+

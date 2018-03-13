@@ -1,0 +1,138 @@
+#!/bin/bash
+#
+# Copyright (C) 2006 Novell Inc.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the
+# Free Software Foundation, Inc.,
+# 51 Franklin Street,
+# Fifth Floor,
+# Boston, MA  02110-1301,
+# USA.
+#
+# $Id: create_md5sums 110 2009-03-06 15:30:14Z lrupp $
+#
+
+function usage (){
+    echo
+    echo "Usage: `basename $0` [--meta] <targetdir>"
+    echo "       --meta : also create MD5SUMS.meta file"
+    echo "       --quiet: don't output anything"
+    echo 
+    echo "       Creates MD5SUMS files in each subdirectory."
+    echo "       Sometimes useful for debugging inst-source problems ;-)"
+    echo
+    exit $1
+}
+
+function output(){
+    if [ "$QUIET" != "yes" ]; then
+        echo "$1"
+    fi
+}
+
+if [ -z "$1" ]; then
+  usage 1;
+fi
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]] ; then
+  usage 0;
+fi
+
+unset LANGUAGE
+unset LANG
+export LC_ALL=POSIX
+umask 022
+
+CREATE_META=
+QUIET="no"
+
+if test "x$1" = "x--meta"; then
+    CREATE_META=1
+    shift
+fi
+if test "x$1" = "x--quiet"; then
+    QUIET="yes"
+    shift
+fi
+
+ROOTDIRS="$*"
+TMPFILE=$(mktemp /tmp/.create_md5sums.XXXXXX)
+MYPWD=$(pwd)
+
+for ROOTDIR in "$@" ; do
+    case "$ROOTDIR" in
+	/*) ;;
+	*) ROOTDIR="$MYPWD/$ROOTDIR" ;;
+    esac
+
+    test -d "$ROOTDIR" || {
+        echo "WARNING: $ROOTDIR is not a directory.  Skipping it."
+    }
+
+    find "$ROOTDIR" -type d | while read DIR; do
+        cd "$DIR"
+        unset FILES
+        NFILES=0
+        for FILE in * ; do
+            test -f "$FILE" || continue
+            test -L "$FILE" && continue
+            test -n "$MD5SUMS_SKIPFILES" && {
+                IS_SKIP=false
+                set -f
+                for i in $MD5SUMS_SKIPFILES ; do
+                    set +f
+                    case "$FILE" in
+                      ($i)
+                        IS_SKIP=true
+                        break
+                        ;;
+                    esac
+                done
+                set +f
+                test $IS_SKIP = true && continue
+            }
+            case "$FILE" in
+              (*.swp|MD5SUMS*|SHA1SUMS*)
+                continue
+                ;;
+              (*)
+                FILES[$[++NFILES]]="$FILE"
+                ;;
+            esac
+          done
+        if [ $NFILES -eq 0 ]; then
+            rm -f MD5SUMS*
+        else
+            echo -n > $TMPFILE
+            for FILE in "${FILES[@]}"; do
+                md5sum "$FILE" >> $TMPFILE;
+            done
+            test -e MD5SUMS || touch MD5SUMS
+	        cmp -s $TMPFILE MD5SUMS || {
+                mv $TMPFILE MD5SUMS
+				chmod 644 MD5SUMS
+                output "INFO:   created MD5SUMS in $DIR"
+	        }
+	    if test -n "$CREATE_META"; then
+            test -e MD5SUMS.meta || touch MD5SUMS.meta
+            md5sum MD5SUMS > $TMPFILE
+            cmp -s $TMPFILE MD5SUMS.meta || {
+		        mv $TMPFILE MD5SUMS.meta
+                chmod 644 MD5SUMS.meta
+                output "INFO:   created MD5SUMS.meta in $DIR"
+            }
+	    fi
+            rm -f $TMPFILE
+        fi
+    done
+done

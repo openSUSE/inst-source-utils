@@ -1,0 +1,192 @@
+#!/usr/bin/perl
+
+# Copyright (C) 2006 Novell Inc.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the
+# Free Software Foundation, Inc.,
+# 51 Franklin Street,
+# Fifth Floor,
+# Boston, MA  02110-1301,
+# USA.
+#
+
+
+BEGIN {
+  unshift @INC, "/usr/share/inst-source-utils/modules";
+}
+
+$| = 1;
+
+use strict;
+use Cwd;
+use Time::localtime;
+use Time::Local;
+use RPMQ;
+
+# current date minus two years
+my $min_date = time - 2*365*24*3600;
+my %month_to_num = (Jan=>0,Feb=>1,Mar=>2,Apr=>3,May=>4,Jun=>5,Jul=>6,Aug=>7,Sep=>8,Oct=>9,Nov=>10,Dec=>11);
+my $delimiter = "------------------------------------------------------------------";
+my $actual = 0;
+my $skip_rest = 0;
+my %entries = ();
+my %packages = ();
+my $announce_string = "";
+
+# environment
+my $current_client = $ARGV[0];
+chomp ( $current_client = getcwd ) unless ( $current_client );
+my $root_on_cd = $ENV{"ROOT_ON_CD"};
+$root_on_cd = "suse" unless ($root_on_cd);
+
+my $cds_prim = "";
+my @pactreeCDall = ();
+
+if ( -d "$current_client/DVD1/$root_on_cd" ) {
+    $cds_prim = "$current_client/DVD1";
+    for my $i (1...9) {
+	push @pactreeCDall, "$current_client/DVD$i/$root_on_cd" if ( -d "$current_client/DVD$i/$root_on_cd" );
+    }
+} elsif ( -d "$current_client/CD1/$root_on_cd" ) {
+    $cds_prim = "$current_client/CD1";
+    for my $i (1...9) {
+	push @pactreeCDall, "$current_client/CD$i/$root_on_cd" if ( -d "$current_client/CD$i/$root_on_cd" );
+    }
+} else {
+    $cds_prim = "$current_client";
+    push @pactreeCDall, "$current_client/$root_on_cd";
+}
+  
+my $distro = $ENV{"BBASENAME"};
+$distro = "all" unless ($distro);
+#print "cds_prim is $cds_prim\n";
+#print "distro   is $distro\n";
+
+sub process_line {
+   my ($myline,$package) = @_;
+   chomp ($myline);
+   next if ($myline =~ /^--$/);
+   next if ($myline =~ /^=========================================*$/);
+   if ($myline =~ /^\* .* - .*\@.*/) {
+    my @datarray = split ( ' ',$myline);
+    my $last_actual = $actual;
+    if ( $datarray[4] < 1980 || $datarray[3] < 1  || $datarray[2] < 0
+      || $datarray[4] > 2100 || $datarray[3] > 31 || $datarray[2] > 11 ) {
+         $datarray[2] = 1;
+         $datarray[3] = 1;
+         $datarray[4] = 1;
+         warn ("invalid date line in $package: $myline\n");
+    }
+    my $monthnum = $month_to_num{$datarray[2]};
+    $actual = timelocal ( 0,0,0,$datarray[3],$monthnum, $datarray[4]-1900);
+    if ( $actual < $min_date ) {
+        $skip_rest = 1;
+        next;
+    }
+    if ( $last_actual ne $actual ) {
+       $entries{$actual} .= "\n$announce_string\n";
+    }
+    next;
+  }
+  if ($myline =~ /^\s*-/) {
+    $myline =~ s/^\s*(\S*)/$1/;
+    $myline =~ s/(\S*)\s*$/$1/;
+    $entries{$actual} .= "  $myline\n";
+    next;
+  }
+  if ($myline =~ /\S/) {
+    $myline =~ s/^\s*(\S*)/$1/;
+    $myline =~ s/(\S*)\s*$/$1/;
+    $entries{$actual} .= "    $myline\n";
+  }
+}
+
+
+my $findstr .= join(" ",@pactreeCDall);
+my $lasttime = "";
+#print "findstr = $findstr\n";
+my %allrpms = ();
+open ( RPMLIST , "find $findstr -maxdepth 2 -name \"*.rpm\" -print |");
+while ( my $myrpm = <RPMLIST> ) {
+    chomp ($myrpm);
+    my $basename = $myrpm;
+    $basename =~ s/^.*\///;
+    $allrpms{$basename} = $myrpm;
+}
+close ( RPMLIST );
+
+my $all_num = keys (%allrpms);
+my $cur_num = 0;
+
+for my $myrpm (sort (keys (%allrpms))) {
+    my $myfile = $allrpms{$myrpm};
+    $cur_num++;
+    print "$all_num - $cur_num\r" if ( -t STDOUT );
+    chomp ( $myfile );
+    next unless ( -f $myfile );
+    next unless ( $myfile =~ /\.rpm$/ );
+    my $basename = $myfile;
+    $basename =~ s/^.*\///;
+    # NAME and SOURCERPM
+    my %p_res = RPMQ::rpmq_many($myfile,1000,1044);
+    my $package_r = ($p_res{1000} || [])->[0];
+    my $srcrpm = ($p_res{1044} || [])->[0];
+    next unless ($srcrpm);
+    my $package = $srcrpm;
+    $package =~ s/-[^-]*-[^-]*$//;
+    next if ( $packages{$srcrpm} );
+    $packages{$srcrpm} = 1;
+    $announce_string = "++++ $package:\n";
+    # CHANGELOGTIME, CHANGELOGTEXT
+    my %c_res = RPMQ::rpmq_many($myfile,1080,1082);
+    for my $mytime (@{$c_res{1080} || []}) {
+	  last if ( $mytime < $min_date );
+	  $entries{$mytime} .= "\n$announce_string\n" if ( $lasttime ne $mytime );
+	  $lasttime = $mytime;
+	  for my $myline (split("\n",@{$c_res{1082} || []}[0])) {
+	    $myline =~ s/^\s*(\S*)/$1/;
+	    $myline =~ s/(\S*)\s*$/$1/;
+	    if ( $myline =~ /^-/ ) {
+		    $entries{$mytime} .= "  $myline\n";
+	    } else {
+		    $entries{$mytime} .= "    $myline\n";
+	    }
+	  }
+	  shift @{$c_res{1082} || []};
+    }
+}
+#print "\n";
+unlink "$cds_prim/ChangeLog";
+open ( CHANGELOG , "> $cds_prim/ChangeLog" );
+my $clog = "Changelog.$distro -----------------";
+my $clog_len = length ( $clog );
+my $clog_rest = 25 - $clog_len;
+my $mydate = `date`;
+chomp ($mydate);
+print CHANGELOG "$delimiter\n";
+printf CHANGELOG "--- %.25s %s ------\n" , $clog , $mydate;
+print CHANGELOG "$delimiter\n";
+
+
+foreach my $key (sort {0+$b <=> 0+$a} (keys %entries)) {
+  my $ltime = localtime $key;
+  my $kyear = $ltime->year + 1900;
+  my $kmon  = $ltime->mon + 1;
+  my $kmon_ascii = (qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec))[$ltime->mon];
+  my $kday  = $ltime->mday;
+  print CHANGELOG "$delimiter\n------------------  $kyear-$kmon-$kday  -  $kmon_ascii $kday $kyear  -------------------\n$delimiter\n";
+  print CHANGELOG "$entries{$key}\n";
+}
+
+close ( CHANGELOG );

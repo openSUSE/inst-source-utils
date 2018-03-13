@@ -1,0 +1,709 @@
+#!/usr/bin/perl
+#
+# Copyright (C) 2006 Novell Inc.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the
+# Free Software Foundation, Inc.,
+# 51 Franklin Street,
+# Fifth Floor,
+# Boston, MA  02110-1301,
+# USA.
+#
+# $Id: create_package_descr,v 1.29 2008/06/24 18:42:26 lrupp Exp lrupp $
+#
+
+BEGIN {
+  $abuild_base_dir = "/usr/share/inst-source-utils";
+  unshift @INC, "$abuild_base_dir/modules";
+}
+
+$| = 1;
+
+use File::stat;
+use FileHandle;
+use strict;
+use RPMQ;
+use Digest::MD5 ();
+use Encode;
+
+my (@DATADIRS,@IGNOREDIRS,@LANGUAGES,%SEEN_PACKAGE,%IGNORE_PACKAGE,@SHA_CACHEDIR);
+my %lang_alias = ( "czech"=>"cs",
+                   "english"=>"en",
+                   "french"=>"fr",
+                   "german"=>"de",
+                   "italian"=>"it",
+                   "russian" => "ru",
+                   "spanish"=>"es",
+                   "hungarian"=>"hu" );
+my %tag_short = ("description"=>"Des","notice"=>"Ins","delnotice"=>"Del");
+my $ignored_packages = "";
+my $ignore_sources = "0";
+my $ignore_symlinks = "0";
+my $prefer_yastdescr = "0";
+my $add_licenses = "0";
+my $do_checksums = "0";
+my $do_sha256 = "0";
+my $do_keywords = "0";
+my $have_sha_cache = 0;
+my $do_file_list = 0;
+my $maxdepth = 255;
+my $src_requires = 0;
+my $default_lang="english";
+my $add_vendor = 0;
+my $allow_shr = 1;
+my %used_fallbacks;
+my $checksum_binary = "sha1sum";
+my $unused_data_dir = "";
+my $eula_data_dir = "";
+my $ignore_file = "";
+my $ignore_dir = "";
+my $output_dir = "";
+my $extra_requires = "";
+my $extra_provides = "";
+my $extra_tags = "";
+my $with_links = "";
+my $use_headers = "0";
+
+my %xprovlist;
+my %xreqlist;
+my %xtaglist;
+my %pkg_lang;
+
+sub usage {
+    my $exit_code=shift || 1;
+    print "Usage: create_package_descr [OPTIONS]\n";
+    print "       [-d DATADIR1 [-d DATADIR2 [... ] ] ] (default cwd)\n";
+    print "       [-e EULA_DIR ]\n";
+    print "       [-x EXTRA_PROV_FILE ]\n";
+    print "       [-r EXTRA_REQUIRES_FILE]\n";
+    print "       [-i IGNORE_DIR [ -i IGNORE_DIR [... ] ] ]\n";
+    print "       [-I IGNORE_FILE ]\n";
+    print "       [-l LANG1 [-l LANG2 [... ] ]  (default $default_lang)\n";
+    print "       [-o OUTPUT_DIR ]              (default `cwd`/setup/descr)\n";
+    print "       [-c CACHE_DIR ]               (default none)\n";
+    print "       [-M MAXDEPTH ]                (default $maxdepth, depth for du-file)\n";
+    print "       [-T XTAGS_FILE ]              (extra tags for the packages file)\n";
+    print "       [-Z ]                         (add_licenses)\n";
+    print "       [-V ]                         (add_vendor for each rpm)\n";
+    print "       [-S ]                         (ignore_sources)\n";
+    print "       [-P ]                         (prefer_yastdescr)\n";
+    print "       [-L ]                         (ignore_symlinks)\n";
+    print "       [-C ]                         (do_checksums)\n";
+    print "       [-D ]                         (do_sha256_checksums)\n";
+    print "       [-K ]                         (do_keywords)\n";
+    print "       [-F ]                         (do_file_list)\n";
+    print "       [-B ]                         (add requires for src packages)\n\n";
+    print "       [-Q ]                         (never use Shr tags)\n";
+    print "       [-H ]                         (Use headers)\n\n";
+	print "       Note: the -T option allows to add additional tags to the\n";
+	print "             resulting packages file.\n";
+	print "             The file should contain the package name, a colon and\n";
+	print "             a whitespace. Afterwards, additional tags in one line\n";
+	print "             (newlines can be produced via \\n).\n";
+	print "             Example: 3ddiag: +Kwd:\\nsupport_l3\\n-Kwd:\n";
+    exit $exit_code;
+}
+
+sub filter_weak {
+  my ($r, $tn, $tf) = @_;
+  my @tf = @{$r->{$tf} || []};
+  my @res;
+  for (@{$r->{$tn}}) {
+    push @res, $_ unless (shift @tf) & 0x8000000;
+  }
+  return @res;
+}
+
+sub filter_strong {
+  my ($r, $tn, $tf) = @_;
+  my @tf = @{$r->{$tf} || []};
+  my @res;
+  for (@{$r->{$tn}}) {
+    push @res, $_ if (shift @tf) & 0x8000000;
+  }
+  return @res;
+}
+
+my @SAVEARGS;
+
+for (@ARGV) {
+   push @SAVEARGS, $_;
+}
+
+while ( my $arg = shift ( @ARGV ) ) {
+  if ( $arg eq "-d" ) { push @DATADIRS , shift @ARGV ; }
+  elsif ( $arg eq "-B" ) { $src_requires = 1; }
+  elsif ( $arg eq "-V" ) { $add_vendor = 1; }
+  elsif ( $arg eq "-C" ) { $do_checksums = "1"; }
+  elsif ( $arg eq "-D" ) { $do_checksums = "1";  $do_sha256 = "1"; $checksum_binary = "sha256sum"; }
+  elsif ( $arg eq "-F" ) { $do_file_list = 1; }
+  elsif ( $arg eq "-H" ) { $use_headers = 1; }
+  elsif ( $arg eq "-I" ) { $ignore_file = shift @ARGV ; }
+  elsif ( $arg eq "-K" ) { $do_keywords = "1"; }
+  elsif ( $arg eq "-L" ) { $ignore_symlinks = "1"; }
+  elsif ( $arg eq "-M" ) { $maxdepth = shift @ARGV ; }
+  elsif ( $arg eq "-P" ) { $prefer_yastdescr = "1"; }
+  elsif ( $arg eq "-S" ) { $ignore_sources = "1"; }
+  elsif ( $arg eq "-Z" ) { $add_licenses = "1" ; }
+  elsif ( $arg eq "-Q" ) { $allow_shr = 0; }
+  elsif ( $arg eq "-c" ) { push @SHA_CACHEDIR , shift @ARGV ; }
+  elsif ( $arg eq "-i" ) { push @IGNOREDIRS, shift @ARGV ; }
+  elsif ( $arg eq "-l" ) { push @LANGUAGES , shift @ARGV ; }
+  elsif (( $arg eq "-h" ) || ( $arg eq "--help" )) { shift @ARGV ; usage(0); }
+  elsif ( $arg eq "-o" ) { $output_dir = shift @ARGV ; }
+  elsif ( $arg eq "-p" ) { $unused_data_dir = shift @ARGV ; }
+  elsif ( $arg eq "-e" ) { $eula_data_dir = shift @ARGV ; }
+  elsif ( $arg eq "-r" ) { $extra_requires = shift @ARGV ; }
+  elsif ( $arg eq "-x" ) { $extra_provides = shift @ARGV ; }
+  elsif ( $arg eq "-T" ) { $extra_tags = shift @ARGV ; }
+  else {
+	 print STDERR "\nunknown parameter $arg\n\n";
+     usage(1);
+  }
+}
+
+if ( $ignore_symlinks eq "1" ) {
+  $with_links = "-type f";
+} else {
+  $with_links = "";
+}
+
+for (@SHA_CACHEDIR) {
+    $have_sha_cache++ if ( -d $_ );
+}
+
+push @DATADIRS , "." unless ( @DATADIRS );
+push @LANGUAGES , "$default_lang" unless ( @LANGUAGES );
+$output_dir = "./setup/descr/" unless ( $output_dir );
+
+print "INFO:    datadirs       : ".join(",",@DATADIRS)."\n";
+print "INFO:    languages      : ".join(",",@LANGUAGES)."\n";
+print "INFO:    output dir     : $output_dir\n";
+
+if ( $extra_provides ) {
+  if ( -f $extra_provides ) {
+    print "INFO:    extra_provides : $extra_provides\n";
+    %xprovlist = %{ReadFileToHash( $extra_provides )};
+  } else {
+    print "WARNING: extra_provides : file $extra_provides not found!\n";
+  }
+} else {
+    print "WARNING: -x not specified\n";
+    print "WARNING: this means all provides like /bin/sh will be missing\n";
+}
+
+if ( $extra_requires ) {
+  if ( -f $extra_requires ) {
+    print "INFO:    extra_requires : $extra_requires\n";
+    %xreqlist = %{ReadFileToHash( $extra_requires )};
+  } else {
+    print "WARNING: extra_requires : file $extra_requires not found!\n";
+  }
+}
+if ( $extra_tags ) {
+  if ( -f $extra_tags ) {
+    print "INFO:    extra_tags : $extra_tags\n";
+    %xtaglist = %{ReadFileToHash( $extra_tags )};
+  } else {
+    print "WARNING: extra_tags : file $extra_tags not found!\n";
+  }
+}
+
+unless ( -d "$output_dir" ) {
+	print "INFO:    creating output directory $output_dir\n";
+	mkdir_p("$output_dir");
+}
+
+if ( @IGNOREDIRS ) {
+  foreach $ignore_dir (@IGNOREDIRS) {
+    if ( -d "$ignore_dir" && opendir ( IGNDIR, "$ignore_dir") ) {
+      while ( my $ign = readdir( IGNDIR ) ) {
+        next if ( $ign =~ /^\./ );
+        $IGNORE_PACKAGE{$ign} = "yes";
+      }
+      closedir ( IGNDIR );
+      print "INFO:    ignoring packages listed in directory $ignore_dir\n";
+    }
+  }
+}
+
+if ( "$ignore_file" ) {
+  if ( -f "$ignore_file" && open ( IGNFILE, "$ignore_file" ) ) {
+    while ( my $ign = <IGNFILE> ) {
+      chomp ( $ign );
+      $IGNORE_PACKAGE{$ign} = "yes";
+    }
+    close ( IGNFILE );
+    print "INFO:    ignoring packages listed in file $ignore_file\n";
+  }
+}
+
+if ( $ignore_sources eq "1" ) {
+    print "WARNING: ignoring all source packages\n";
+}
+
+my $pkg_main = OpenFileWrite ( "$output_dir/packages" );
+WriteSEntry( $pkg_main, "Ver", "2.0" );
+foreach my $lang (@LANGUAGES) {
+  $pkg_lang{$lang} = OpenFileWrite ( "$output_dir/packages.$lang_alias{$lang}" );
+  WriteSEntry( $pkg_lang{$lang}, "Ver", "2.0" );
+}
+my $pkg_du = OpenFileWrite ( "$output_dir/packages.DU" );
+my $pkg_fl = OpenFileWrite ( "$output_dir/packages.FL" ) if $do_file_list;
+
+WriteSEntry( $pkg_du, "Ver", "2.0" );
+WriteSEntry( $pkg_fl, "Ver", "2.0" ) if $do_file_list;
+
+my $media_number = 0;
+my $allcounter = 0;
+my $wrote_comment = 0;
+
+foreach my $datapath (@DATADIRS) {
+  $media_number++;
+  open ( FIND, "find '$datapath' -maxdepth 2 $with_links -name \"*.[rs]pm\" -print | sort |" );
+  my @pkg_arr = ();
+  my @src_arr = ();
+  while ( <FIND> ) {
+    chomp ( $_ );
+    next if (/\.delta\.rpm$/);
+    if ( /\.spm$/ || /src\.rpm$/ ) {
+	push @src_arr, $_;
+    } else {
+	push @pkg_arr, $_;
+    }
+  }
+  close ( FIND );
+  foreach my $package (@pkg_arr,@src_arr) {
+   $allcounter++;
+   print "INFO:    CD$media_number - Pkg: $allcounter\r" if ( -t STDOUT );
+   my $filespec = "$package";
+   chomp ( $filespec );
+   $filespec =~ /\/([^\/]*)$/;
+   my $filename = $1;
+   my $filesize;
+   # name, version, release, arch, obsolete, requires, provides,
+   # conflicts, copyright, group, buildtime, size, sourcerpm
+   my %res = RPMQ::rpmq_many("$package", 1000, 1001, 1002, 1022,
+                                         1090, 1114, 1115,
+                                         1047, 1112, 1113,
+                                         1049, 1048, 1050,
+                                         1054, 1053, 1055,
+                                         1156, 1157, 1158,
+                                         1159, 1160, 1161,
+                                         1027, 1116, 1117, 1118, 1030, 1028, 1095, 1096,
+                                         1014, 1016, 1006, 1009, 1044, 1004, 1005, 1011, 1124,
+                                         5046, 5047, 5048, 5049, 5050, 5051,
+                                         5052, 5053, 5054, 5055, 5056, 5057, "HEADERSTART", "SIGTAG_SIZE", "EXTRA"
+   );
+
+   # skip delta rpms (if PAYLOADFORMAT eq drpm)
+   next if ($res{1124}[0] && $res{1124}[0] eq "drpm");
+   #
+   my $data = $res{"SIGTAG_SIZE"}[0];
+   my $header = $res{"HEADERSTART"}[0];
+
+   my @depexcl = $res{1054};
+   my @prereq = rpmq_add_req_flagsvers(\%res, 1049, 1048, 1050); # requires
+   RPMQ::rpmq_add_flagsvers(\%res, 1047, 1112, 1113); # provides
+   RPMQ::rpmq_add_flagsvers(\%res, 1090, 1114, 1115); # obsoletes
+   RPMQ::rpmq_add_flagsvers(\%res, 1054, 1053, 1055); # conflicts
+
+   RPMQ::rpmq_add_flagsvers(\%res, 1156, 1158, 1157) if $res{1156}; # oldsuggests
+   RPMQ::rpmq_add_flagsvers(\%res, 1159, 1161, 1160) if $res{1159}; # oldenhances
+
+   RPMQ::rpmq_add_flagsvers(\%res, 5046, 5048, 5047) if $res{5046}; # recommends
+   RPMQ::rpmq_add_flagsvers(\%res, 5049, 5051, 5050) if $res{5049}; # suggests
+   RPMQ::rpmq_add_flagsvers(\%res, 5052, 5054, 5053) if $res{5052}; # supplements
+   RPMQ::rpmq_add_flagsvers(\%res, 5055, 5057, 5056) if $res{5055}; # enhances
+
+   my $rpm_name = $res{1000}[0];
+   if ( $IGNORE_PACKAGE{$rpm_name} && $IGNORE_PACKAGE{$rpm_name} eq "yes" ) {
+      $ignored_packages .= " $rpm_name";
+      next;
+   }
+   my @pack_path = split('/',"$package");
+   pop @pack_path; # filename
+   pop @pack_path; # dirname / rpm-arch
+   my $pack_basedir = join('/',@pack_path);
+
+   my $checksum = "";
+   my $dummy = "";
+   my $hash = "";
+   my $DULIST;
+   my $FLIST;
+   my $file_arch;
+   my %pacdata;
+
+   if ( $use_headers eq "1" ){
+      $filesize = $res{'EXTRA'}[0]{size};
+   } else {
+      $filesize = $data + $header;
+   }
+   my $srcrpm = $res{1044}[0];
+   $srcrpm =~ s/^(.*)-([^-]*)-([^-]*)\.([^\.]*)\.rpm$/$1 $2 $3 $4/;
+   if ($do_checksums eq "1" && $use_headers ne "1") {
+	if ( $have_sha_cache ne "0" ) {
+		my %qq = RPMQ::rpmq_many("$package", qw{SIGTAG_GPG SIGTAG_PGP SIGTAG_SHA1});
+		if ( %qq ) {
+			for (qw{SIGTAG_GPG SIGTAG_PGP SIGTAG_SHA1}) {
+				$hash .= join('', @{$qq{$_} || []});
+			}
+			$hash = Digest::MD5::md5_hex($hash);
+		}
+		for (@SHA_CACHEDIR) {
+		    if ( -f "$_/$rpm_name-$hash" ) {
+			open ( CSC, "< $_/$rpm_name-$hash" );
+			$checksum = <CSC>;
+			chomp ($checksum);
+			close ( CSC );
+			#print "INFO: re_using checksum for $package ($checksum)\n";
+		    }
+		}
+		if ($do_sha256 eq "1") {
+		    $checksum = "" unless length($checksum) == 64;
+		} else {
+		    $checksum = "" unless length($checksum) == 40;
+		}
+	}
+	if ( ! $checksum ) {
+        if ( $res{1044}[0] || $ignore_sources eq "0") {
+            ($checksum,$dummy) = split('\s+',`$checksum_binary '$package'`);
+		    if ( $have_sha_cache eq "1" ) {
+			    open ( CSC, "> $SHA_CACHEDIR[0]/$rpm_name-$hash" );
+			    print CSC $checksum;
+			    close ( CSC );
+			    #print "INFO: wrote checksum for $package ($checksum)\n";
+            }
+        }
+   }
+   }
+   if ($use_headers eq "1") {
+      if ($checksum_binary == "sha1sum") {
+	  $checksum = $res{'EXTRA'}[0]{sha1};
+      }elsif ($checksum_binary == "sha256sum"){
+	  $checksum = $res{'EXTRA'}[0]{sha256};
+      }
+   }
+   if ( $res{1044}[0] ) {
+	($DULIST,$FLIST) = RpmToDulist($maxdepth, \%res, '');
+	$file_arch = $res{1022}[0];
+   } else {
+	next if ( $ignore_sources eq "1" );
+	# has no source, so it is a source
+	if ( $filename =~ /\.spm$/ ) {
+		$file_arch = "src";
+	} else {
+		$file_arch = "$filename";
+		$file_arch =~ s/^.*\.([^\.]*)\.rpm$/$1/;
+	}
+	($DULIST,$FLIST) = RpmToDulist($maxdepth, \%res, 'usr/src/packages/');
+   }
+   my %x_prov = ();
+   if ( $xprovlist{"$rpm_name.$file_arch"} ) {
+     foreach my $xprov (split('\s', $xprovlist{"$rpm_name.$file_arch"} )) {
+	$x_prov{$xprov} = 1;
+     }
+   }
+   # should be else if, but merging both is needed right now
+   if ( $xprovlist{$rpm_name} ) {
+     foreach my $xprov (split('\s', $xprovlist{$rpm_name} )) {
+	$x_prov{$xprov} = 1;
+     }
+   }
+   # add createrepo-style file provides (/etc/*,*bin/*,/usr/lib/sendmail)
+   foreach $filename (@{$res{1027}}) {
+       $x_prov{$filename} = 1 if ( $filename =~ /^\/etc\// || $filename =~ /bin\// || $filename eq "/usr/lib/sendmail" );
+   }
+   push @{$res{1047}}, sort keys %x_prov;
+   # adding additional requires for a package (but not for src packages)
+   if ($xreqlist{$rpm_name} && $res{1044}[0]) {
+     foreach my $xreq (split('\s', $xreqlist{$rpm_name} )) {
+       push (@{$res{1049}},$xreq);
+     }
+   }
+
+    WriteSeparator( $pkg_main );
+    WriteComment( $pkg_main, @SAVEARGS ) unless $wrote_comment;
+    WriteSeparator( $pkg_main ) unless $wrote_comment;
+    $wrote_comment = 1;
+    WriteSEntry( $pkg_main, "Pkg", "$res{1000}[0] $res{1001}[0] $res{1002}[0] $file_arch");
+    if ($do_sha256 eq "1") {
+	WriteSEntry( $pkg_main, "Cks", "SHA256 $checksum") if ($checksum);
+    } else {
+	WriteSEntry( $pkg_main, "Cks", "SHA1 $checksum") if ($checksum);
+    }
+    if ( $res{1044}[0] ) {
+    	# has src, so it's a binary package
+    	WriteMEntry( $pkg_main, "Req", @{$res{1049}} );
+    	WriteMEntry( $pkg_main, "Prq", @prereq );
+    	WriteMEntry( $pkg_main, "Prv", @{$res{1047}} );
+    	WriteMEntry( $pkg_main, "Con", @{$res{1054}} );
+    	WriteMEntry( $pkg_main, "Obs", @{$res{1090}} );
+    	WriteMEntry( $pkg_main, "Rec", @{$res{5046}} ) if $res{5046};
+    	WriteMEntry( $pkg_main, "Rec", filter_strong(\%res, 1156, 1158)) if !$res{5046} && $res{1156};
+    	WriteMEntry( $pkg_main, "Sug", @{$res{5049}} ) if $res{5049};
+    	WriteMEntry( $pkg_main, "Sug", filter_weak(\%res, 1156, 1158)) if !$res{5049} && $res{1156};
+    	WriteMEntry( $pkg_main, "Sup", @{$res{5052}} ) if $res{5052};
+    	WriteMEntry( $pkg_main, "Sup", filter_strong(\%res, 1159, 1161)) if !$res{5052} && $res{1159};
+    	WriteMEntry( $pkg_main, "Enh", @{$res{5055}} ) if $res{5055};
+    	WriteMEntry( $pkg_main, "Enh", filter_weak(\%res, 1159, 1161)) if !$res{5055} && $res{1159};
+    	WriteSEntry( $pkg_main, "Grp", $res{1016}[0] );
+    	WriteSEntry( $pkg_main, "Lic", $res{1014}[0] );
+    	WriteSEntry( $pkg_main, "Vnd", $res{1011}[0] ) if $add_vendor;
+    	WriteSEntry( $pkg_main, "Src", $srcrpm );
+	    WriteSEntry( $pkg_main, "Tim", $res{1006}[0] );
+        WriteSEntry( $pkg_main, "Loc", "$media_number $filename");
+    } else {
+	    WriteMEntry( $pkg_main, "Req", @{$res{1049}} ) if $src_requires;
+        WriteSEntry( $pkg_main, "Loc", "$media_number $filename $file_arch");
+    }
+    WriteSEntry( $pkg_main, "Siz", "$filesize $res{1009}[0]" );
+
+    WriteAnyEntry( $pkg_main, $xtaglist{$rpm_name} ) if ($xtaglist{$rpm_name} && $res{1044}[0]);
+
+    if ($SEEN_PACKAGE{"$rpm_name $res{1001}[0] $res{1002}[0]"} && $allow_shr) {
+	    my $found_in = $SEEN_PACKAGE{"$rpm_name $res{1001}[0] $res{1002}[0]"};
+	    WriteSEntry( $pkg_main, "Shr", "$res{1000}[0] $res{1001}[0] $res{1002}[0] $found_in");
+    } else {
+	    foreach my $lang (@LANGUAGES) {
+			WriteSeparator( $pkg_lang{$lang} );
+			WriteSEntry( $pkg_lang{$lang}, "Pkg", "$res{1000}[0] $res{1001}[0] $res{1002}[0] $file_arch");
+			WriteSEntry( $pkg_lang{$lang}, "Sum", "$res{1004}[0]" );
+			WriteMEntry( $pkg_lang{$lang}, "Des", split('\n', $res{1005}[0] ));
+			if ( $add_licenses eq "1" && -f "$eula_data_dir/$rpm_name.en") {
+				open (LIC,"$eula_data_dir/$rpm_name.en");
+				my @license = <LIC>;
+				close (LIC);
+				WriteMEntry( $pkg_lang{$lang}, "Eul", @license);
+			}
+				
+	    }
+    }
+    WriteSeparator( $pkg_du );
+    WriteSEntry( $pkg_du, "Pkg", "$res{1000}[0] $res{1001}[0] $res{1002}[0] $file_arch");
+    WriteMEntry( $pkg_du, "Dir", @{$DULIST} );
+    if ($do_file_list) {
+		WriteSeparator( $pkg_fl );
+		WriteSEntry( $pkg_fl, "Pkg", "$res{1000}[0] $res{1001}[0] $res{1002}[0] $file_arch");
+		WriteMEntry( $pkg_fl, "Fls", @{$FLIST} );
+    }
+    $SEEN_PACKAGE{"$rpm_name $res{1001}[0] $res{1002}[0]"} = $file_arch unless $SEEN_PACKAGE{"$rpm_name $res{1001}[0] $res{1002}[0]"};
+  }
+}
+print "INFO:    processed $allcounter packages in $media_number volumes\n";
+if ( $ignored_packages ) {
+    print "INFO:    following packages were ignored: $ignored_packages\n";
+}
+
+close ( $pkg_main );
+foreach my $lang (@LANGUAGES) {
+  close ( "$pkg_lang{$lang}" );
+}
+close ( $pkg_du );
+close ( $pkg_fl ) if $do_file_list;
+
+#####################################################################
+#####################################################################
+
+sub mkdir_p {
+  my $dir = shift;
+
+  return 1 if -d "$dir";
+  if ($dir =~ /^(.*)\//) {
+    mkdir_p("$1") || return undef;
+  }
+  return undef if !mkdir("$dir", 0777);
+  return 1;
+}
+
+sub OpenFileWrite {
+  my $filename = shift;
+  my ($FH) = new FileHandle;
+  open ($FH, ">$filename") || die "ERROR: can't write output file $filename";
+  return $FH;
+}
+
+sub OpenFileRead {
+  my $filename = shift;
+  my ($FH) = new FileHandle;
+  open ($FH, "<$filename") || die "ERROR: can't read input file $filename";
+  return $FH;
+}
+
+sub ReadFileToHash {
+  my ($filename) = @_;
+  my (%temp);
+  my $FH = OpenFileRead( "$filename" );
+  while (<$FH>) {
+    chomp ($_);
+    last if ( $_ =~ /^:END/ );
+    next if ( $_ =~ /^\#/ );
+    next if ( $_ =~ /^\s$/ );
+    my ($le,$ri) = split (/:/, $_, 2 );
+    $le =~ s/^\s*(.*)\s*$/$1/;
+    $ri =~ s/^\s*(.*)\s*$/$1/;
+    $ri =~ s/\\n/\n/g;
+    $temp{$le}=$ri;
+  }
+  close ($FH);
+  \%temp;
+}
+
+sub WriteSeparator {
+  my ($FH) = shift;
+  print $FH "##----------------------------------------\n";
+}
+
+sub WriteComment {
+  my ($FH,@XX) = @_;
+  print $FH "## ".join(" ",@XX)."\n";
+}
+
+sub utf8ify {
+  my ($value) = @_;
+  eval {
+    Encode::_utf8_on($value);
+    $value = encode('UTF-8', $value, Encode::FB_CROAK);
+  };
+  if ($@) {
+    Encode::_utf8_off($value);
+    $value = encode('UTF-8', $value, Encode::FB_DEFAULT);
+  }
+  Encode::_utf8_off($value);
+  return $value;
+}
+
+sub WriteAnyEntry {
+  my ($FH,$value) = @_;
+  $value = utf8ify($value) if $value =~ /[\200-\377]/s;
+  print $FH "$value\n";
+}
+
+sub WriteSEntry {
+  my ($FH,$tag,$value) = @_;
+  if ( $value ) {
+    $value = utf8ify($value) if $value =~ /[\200-\377]/s;
+    print $FH "=$tag: $value\n";
+  }
+}
+
+sub WriteMEntry {
+  my ($FH,$tag,@value) = @_;
+  if ( @value && $value[0] ) {
+    my $value = join("\n", @value);
+    $value = utf8ify($value) if $value =~ /[\200-\377]/s;
+    print $FH "+$tag:\n$value\n-$tag:\n";
+  }
+}
+
+sub RpmToDulist {
+  my $maxdepth = shift;
+  my $res = shift;
+  my $prefix = shift;
+  
+  if (!$res->{1027}) {
+    my @newfl = ();
+    my @di = @{$res->{1116} || []};
+    for (@{$res->{1117} || []}) {
+      my $di = shift @di;
+      push @newfl, $res->{1118}->[$di] . $_;
+    }
+    $res->{1027} = [ @newfl ];
+  }
+  my @modes = @{$res->{1030} || []};
+  my @devs = @{$res->{1095} || []};
+  my @inos = @{$res->{1096} || []};
+  my @names = @{$res->{1027} || []};
+  my @sizes = @{$res->{1028} || []};
+  my %seen = ();
+  my %dirnum = ();
+  my %subdirnum = ();
+  my %dirsize = ();
+  my %subdirsize = ();
+  my ($name, $first);
+  my @flist = ();
+  for $name (@names) {
+    my $mode = shift @modes;
+    my $dev = shift @devs;
+    my $ino = shift @inos;
+    my $size = shift @sizes;
+    # strip leading slash
+    # prefix is either empty or ends in /
+    $name =~ s/^\///;
+    $name = "$prefix$name";
+    push @flist, "/$name";
+
+    # check if regular file
+    next if ($mode & 0170000) != 0100000;
+    # don't count hardlinks twice
+    next if $seen{"$dev $ino"};
+    $seen{"$dev $ino"} = 1;
+
+    # rounded size in kbytes
+    $size = int ($size / 1024) + 1;
+
+    $name = '' unless $name =~ s/\/[^\/]*$//;
+    if ( ($name =~ tr/\///) < $maxdepth ) {
+		$dirsize{"$name/"} += $size;
+		$dirnum{"$name/"} += 1;
+		$subdirsize{"$name/"} ||= 0;	# so we get all keys
+    }
+    # traverse though path stripping components from the back
+    $name =~ s/\/[^\/]*$// while ( ($name =~ tr/\///) > $maxdepth );
+
+    while ($name ne '') {
+		$name = '' unless $name =~ s/\/[^\/]*$//;
+		$subdirsize{"$name/"} += $size;
+		$subdirnum{"$name/"} += 1;
+    }
+  }
+  my @dulist = ();
+  for $name (sort keys %subdirsize) {
+    next unless $dirsize{$name} || $subdirsize{$name};
+    $dirsize{$name} ||= 0;
+    $subdirsize{$name} ||= 0;
+    $dirnum{$name} ||= 0;
+    $subdirnum{$name} ||= 0;
+    push @dulist, "$name $dirsize{$name} $subdirsize{$name} $dirnum{$name} $subdirnum{$name}";
+  }
+  return \@dulist,\@flist;
+}
+
+sub rpmq_add_req_flagsvers {
+  my $res = shift;
+  my $name = shift;
+  my $flags = shift;
+  my $vers = shift;
+  my @prereq = ();
+  return unless $res;
+  my @flags = @{$res->{$flags} || []};
+  my @vers = @{$res->{$vers} || []};
+  for (@{$res->{$name}}) {
+    if (@flags && ($flags[0] & 0xe) && @vers) {
+      $_ .= ' ';
+      $_ .= '<' if $flags[0] & 2;
+      $_ .= '>' if $flags[0] & 4;
+      $_ .= '=' if $flags[0] & 8;
+      $_ .= " $vers[0]";
+    }
+    # set on RPMSENSE_PREREQ, RPMSENSE_SCRIPT_PRE and RPMSENSE_SCRIPT_POST
+    if ( $flags[0] & (64+512+1024) ) {
+      push ( @prereq, $_ );
+    }
+    shift @flags;
+    shift @vers;
+  }
+  return @prereq;
+}
+

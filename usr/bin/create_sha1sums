@@ -1,0 +1,173 @@
+#!/bin/bash
+#
+# Copyright (C) 2007 Novell Inc.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License 2
+# as published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the
+# Free Software Foundation, Inc.,
+# 51 Franklin Street,
+# Fifth Floor,
+# Boston, MA  02110-1301,
+# USA.
+#
+# $Id: create_sha1sums 1012 2013-02-17 10:49:03Z lrupp $
+#
+
+SIGN="yes"
+SIGN_OPTS=""
+INCLUDE_SHA1SUMS="no"
+EXTRA="no"
+
+CHECKSUM="sha1sum"
+CHECKSUM_T="SHA1"
+CHECKSUM_F="SHA1SUMS"
+CHECKSUM_O=""
+
+unset LANGUAGE
+unset LANG
+export LC_ALL=POSIX
+umask 022
+
+function usage() {
+	echo "Usage: `basename $0` [OPTIONS] <CD-Rootdir>"
+	echo "       -n : don't re-sign the generated files"
+	echo "       -m : include SHA1SUMS files (or CHECKSUMS files for others)"
+	echo "       -2 : use sha256 instead of sha1"
+	echo "       -x : add sha1sums for extra files"
+	echo
+	echo "       (re-)creates the SHA*SUM lines in the content file"
+	echo "       and signs the content and products file"
+	exit $1
+}
+
+function signit(){
+	if [ "$(type -p sign 2>/dev/null)" != "" ]; then 
+#          if sign -t ; then
+            sign $SIGN_OPTS -d $1
+            sign $SIGN_OPTS -p > $1.key
+#          else
+#            : > $1.asc
+#            cp //keys/default $1.key
+#          fi
+	else
+	  gpg -a -b $1
+	  KEY_ID=`gpg -b < /dev/null | gpg --list-packets | sed -n -e "/^:signature/s@.*keyid @@p"`
+	  gpg --export --armor $KEY_ID > $1.key
+	fi
+}
+
+while getopts 'hnmx2s:' OPTION ; do
+	case $OPTION in
+		h) usage 0
+		;;
+		m) INCLUDE_SHA1SUMS="yes"
+		;;
+		n) SIGN="no"
+		;;
+		s) SIGN_OPTS=$OPTARG
+		;;
+		x) EXTRA="yes"
+		;;
+		2)	CHECKSUM="sha256sum"
+			CHECKSUM_T="SHA256"
+			CHECKSUM_F="CHECKSUMS"
+			CHECKSUM_O="-2"
+		;;
+	esac
+done
+shift $(( OPTIND - 1 ))
+
+if [ ! "$1" ]; then
+    usage 1
+fi
+
+CDS_PRIM=$1
+
+if [ "$1" = "." ]; then
+	CDS_PRIM=$(pwd)
+fi
+
+if [ -f $CDS_PRIM/content ] ; then
+  # prepare content file
+  CONTTMP=$(mktemp $CDS_PRIM/content-XXXXXX)
+  grep -v "^META " $CDS_PRIM/content | grep -v "^KEY " | grep -v "^HASH SHA" > $CONTTMP
+  mv $CONTTMP $CDS_PRIM/content
+  
+  # add pattern and packages files to content file
+  DESCRDIR=`grep DESCRDIR $CDS_PRIM/content | awk '" " { print $2 }'`
+  if [ -z "$DESCRDIR" ]; then
+  	DESCRDIR="suse/setup/descr"
+  fi
+  if test -d $CDS_PRIM/$DESCRDIR ; then
+    pushd $CDS_PRIM/$DESCRDIR >/dev/null
+    rm -f *.asc
+    $CHECKSUM * 2>/dev/null | grep -v "MD5SUMS" | grep -v "directory.yast" | sed -e "s@^@META $CHECKSUM_T @" >> $CDS_PRIM/content
+    popd >/dev/null
+  fi
+  pushd $CDS_PRIM >/dev/null
+  if [ "$EXTRA" = "yes" ] ; then
+      for i in license.tar.gz control.xml installation.xml media.1/info.txt media.1/license.zip y2update.tgz driverupdate; do
+          test -f $i || continue
+          $CHECKSUM $i 2>/dev/null | sed -e "s@^@HASH $CHECKSUM_T @" >> $CDS_PRIM/content
+      done
+      for i in boot/*/* boot/*/loader/linux boot/*/loader/initrd boot/*/loader/*.spl docu/* images/* ; do
+      	test -f $i || continue
+          $CHECKSUM $i 2>/dev/null | sed -e "s@^@HASH $CHECKSUM_T @" >> $CDS_PRIM/content
+      done
+  	# check if we need to include additional files for > 11.0
+  	if grep -q CONTENTSTYLE $CDS_PRIM/content; then
+  		DATADIR=$(grep DATADIR content | awk '" " { print $2 }')
+  		if [ -d "$CDS_PRIM/$DATADIR/setup/slide" ]; then
+  			SLIDESHOWDIR="$CDS_PRIM/$DATADIR/setup/slide"
+  		fi
+  		if test -n "$SLIDESHOWDIR" -a -d "$SLIDESHOWDIR" ; then
+  			/usr/bin/create_sha1sum $CHECKSUM_O --quiet "$SLIDESHOWDIR"
+  		fi
+  		if [ $SIGN = "yes" ]; then
+  			for sha1sumfile in $(find $SLIDESHOWDIR -name $CHECKSUM_F); do
+  				signit "$sha1sumfile"
+  			done
+  		fi
+  	fi
+  
+  fi
+  if [ "$INCLUDE_SHA1SUMS" = "yes" ]; then
+      for i in $(find $CDS_PRIM/ -name $CHECKSUM_F | sed -e "s|./||"); do
+          test -f $i || continue
+          $CHECKSUM $i 2>/dev/null | sed -e "s@^@HASH $CHECKSUM_T @" >> $CDS_PRIM/content
+      done
+  fi
+  
+  # add gpg-key files to content file
+  $CHECKSUM gpg-pubkey-* 2>/dev/null | sed -e "s@^@KEY $CHECKSUM_T  @" >> $CDS_PRIM/content
+  popd >/dev/null
+fi
+
+# signing part
+if [ $SIGN = "yes" ]; then
+  REPOFILE=`find $CDS_PRIM -type f -name repomd.xml 2>/dev/null`
+  REPOFILE=${REPOFILE##$CDS_PRIM}
+  REPOFILE=${REPOFILE##/}
+  for file in content media.1/products $REPOFILE; do
+	test -f $CDS_PRIM/${file}.asc && rm -f $CDS_PRIM/${file}.asc
+	test -f $CDS_PRIM/${file} || continue
+	signit $CDS_PRIM/${file}
+  done
+fi
+
+# make sure everything is readable for all
+for file in content media.1/products $REPOFILE; do
+	for xfile in $CDS_PRIM/$file* ; do
+		test -e $xfile || continue
+		chmod 644 $xfile
+	done
+done

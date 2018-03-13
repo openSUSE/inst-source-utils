@@ -1,0 +1,110 @@
+#!/usr/bin/perl
+
+BEGIN {
+  $abuild_base_dir = "/usr/share/inst-source-utils";
+  unshift @INC, "$abuild_base_dir/modules";
+}
+
+
+use strict;
+use File::stat;
+use ABStructured ':bytes';
+use ABXML;
+use Digest;
+
+
+
+sub GenerateRepomdXml {
+    my ($repodir) = @_;
+    my $repobase = $repodir;
+    $repobase =~ s/\/repodata//;
+    open (REPOMD, "<", "$repodir/repomd.xml");
+    my $repomd_raw = join("",<REPOMD>);
+    close (REPOMD);
+    my $repomd = XMLin($ABXML::repomd, $repomd_raw);
+    for my $record (@{$repomd->{'data'}}) {
+      my $filename = $record->{'location'}->{'href'};
+      my $checksumstring = $record->{'checksum'}->{'type'};
+      my $checksumtype = uc($checksumstring);
+      $checksumtype =~ s/([0-9]+)/-$1/;
+      $checksumtype .= "-1" unless $checksumtype =~ /[0-9]/;
+      next unless open(REC, "<", "$repobase/$filename");
+      my $ctx = Digest->new($checksumtype);
+      $ctx->addfile(*REC);
+      my $newfilechksum = $ctx->hexdigest();
+      close (REC);
+      if ($filename =~ /^([^\/]*\/)?[0-9a-f][0-9a-f]*-(.*\.gz)$/) {
+	my $new_filename = "$1$newfilechksum-$2";
+	rename ("$repobase/$filename","$repobase/$new_filename");
+	$filename = $new_filename;
+	$record->{'location'}->{'href'} = $filename;
+      }
+      my $nstat = stat("$repobase/$filename");
+      my $newfiletime = $nstat->mtime;
+      my $newfilesize = $nstat->size;
+      $record->{'checksum'} = { 'type' => $checksumstring, '_content' => $newfilechksum };
+      $record->{'timestamp'} = $newfiletime;
+      $record->{'size'} = $newfilesize if $record->{'size'};
+    }
+
+    open (REPOMD, ">", "$repodir/repomd.xml");
+    print REPOMD "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    print REPOMD XMLout($ABXML::repomd, $repomd);
+    close (REPOMD);
+}
+
+my $rsyncable = "";
+
+my $arg = shift @ARGV;
+my $tmpdir = `mktemp -d /tmp/rezip_repo_rsyncable.XXXXXX`;
+chomp ($tmpdir);
+if ( $arg ) {
+    die("need an argument") unless ( -d $arg );
+}
+
+if ( $arg !~ /^\// ) {
+    my $pwd = `pwd`;
+    chomp ($pwd);
+    $arg = "$pwd/$arg";
+}
+
+$arg .= "/repodata" unless $arg =~ /\/repodata/;
+
+system ("touch", "$tmpdir/fff");
+system ("gzip --rsyncable \"$tmpdir/fff\" >/dev/null 2>/dev/null");
+if ( -f "$tmpdir/fff.gz" ) {
+    $rsyncable = "--rsyncable";
+}
+unlink ("$tmpdir/fff");
+unlink ("$tmpdir/fff.gz");
+
+if ( $rsyncable ) {
+  my @GZIPPED = glob("$arg/*.gz");
+  for (@GZIPPED) {
+    system ("touch", "--reference", "$_", "$_.timestamp");
+    system ("gunzip", "-f", $_);
+    $_ =~ s/.gz$//;
+    system ("gzip", "-9", "-n", $rsyncable, $_);
+    system ("touch", "--reference", "$_.gz.timestamp", "$_.gz");
+    unlink ("$_.gz.timestamp");
+  }
+  my $has_sign = "";
+  $has_sign = "1" if ( -f "$arg/repomd.xml.asc" );
+  system ("cp", "-a", "$arg/repomd.xml.key", $tmpdir) if ( -f "$arg/repomd.xml.key" );
+  if ( -f "$arg/repomd.xml" ) {
+    GenerateRepomdXml($arg);
+  }
+  if ( $has_sign ) {
+    unlink "$arg/repomd.xml.asc";
+    system ("sign", "-d", "$arg/repomd.xml");
+  }
+  if ( -f "$tmpdir/repomd.xml.key" ) {
+    system ("cp", "-a", "$tmpdir/repomd.xml.key", $arg);
+  }
+  if ( -f "$arg/MD5SUMS" ) {
+    system ("create_md5sums", $arg);
+  }
+}
+
+system("rm", "-r", "-f", $tmpdir);
+

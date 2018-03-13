@@ -1,0 +1,1178 @@
+#!/usr/bin/perl
+#
+# Copyright (C) 2006 Novell Inc.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the
+# Free Software Foundation, Inc.,
+# 51 Franklin Street,
+# Fifth Floor,
+# Boston, MA  02110-1301,
+# USA.
+#
+# $Id: createpatch 186 2009-08-07 18:00:30Z lrupp $
+#
+
+BEGIN {
+  $abuild_base_dir = "/usr/share/inst-source-utils";
+  unshift @INC, "$abuild_base_dir/modules";
+}
+
+$| = 1;
+
+use strict;
+use Cwd;
+use Data::Dumper;
+use File::stat;
+use File::Temp qw/ tempdir /;
+use RPMQ;
+use Time::localtime;
+use Getopt::Long;
+
+# cleanup the environment
+$ENV{'PATH'}='/bin:/usr/bin:/sbin:/usr/sbin:';
+$ENV{'BASH_ENV'}='';
+$ENV{'ENV'}='';
+$ENV{"LC_ALL"} = "C";
+our $DEBUG=0;
+our %config;
+$config{'basedir'}           = cwd();
+$config{'category'}          = "recommended";
+$config{'do_signing'}        = 0;
+$config{'do_susedata'}       = 0;
+$config{'license_file'}      = "";
+$config{'patch_name'}        = "usefirst";
+$config{'patch_version'}     = 0;
+$config{'patch_summary'}     = "";
+$config{'patch_description'} = "";
+$config{'sign_id'}           = "";
+$config{'update_repo'}       = 0;
+$config{'loglevel'}          = 7;
+my $patch_id = `hostname -d`;
+$config{'patch_id'}          = chomp($patch_id);
+
+our %patchinfo_data=();
+our $print_help="";
+our $configfile="";
+our @packagelist;
+our @patchsupplements;
+our @pkgrefresh;
+our $LOCKFILE="/var/tmp/createpatch.lock";
+
+###############################################################################
+# Functions
+###############################################################################
+
+sub usage {
+	my $exitcode=shift || 1;
+       print <<EOF
+
+$0 Usage Information:
+
+ $0 [OPTION] ...
+
+ -b <base_dir>          : is the base directory to the repository.
+
+ -c <CONFIGFILE>        : file containing the option/values mentioned below
+                          Notes: * use the fullnames as option
+                                 * values in config file overwrite commandline 
+                                   values!
+ -e|--do_susedata       : create special susedata.xml files
+ -i <PATCH_ID>          : Patch id, needs to be unique in world, will be prefixed
+                          by "hostname -d" as default followed by the name of the
+                          first package. Dots in "hostname -d" will be converted
+                          to "_"s.
+ -n <PATCH_NAME>        : required parameter, terse patch name, like aaa_base
+ -v <PATCH_VERSION>     : default to "0"/first non-existant if not given
+ -s <PATCH_SUMMARY>     : default to the package summary of the first RPM
+                          specified on the command line
+ -d <PATCH_DESCRTIPON>  : Long description, defaults to the package description
+                          of the first RPM specified on commandline
+ -C <CATEGORY>	        : Category for the patch.  Defaults to recommended.
+                          Possible values: security, recommended, optional
+ 
+ -u                     : run createrepo to update repository and take care of keeping
+                          the patch*xml files - use when augmenting existing repository
+                          with new patches.
+ -s                     : Create special susedata.xml files  
+ -S                     : detached sign the repomd.xml file
+ -I <KEY_ID>            : key-id to use for signing the repomd.xml file, if not given
+                          gpg will use the default signing key
+ -L <CONFIRMATION_FILE> : add a confirmation request (EULA or Reboot request) to the patch, 
+                          read from the file specified
+ --validate             : use xmllint to validate the resulting xml file
+ 
+ -p <rpm_basename>[,rpm_basename...]          : List of RPMs for this patch.
+                                                You need at least one.
+ --patchsupplements <PATCH_NAME>[,PATCH_NAME] : List of patches which are supplemented 
+                                                by this patch
+ --pkgfreshens rpm_basename                   : optional parameter which will override 
+                                                the default freshens value
+EOF
+;
+
+   exit $exitcode;
+}
+
+sub parsePrimaryXml ($) {
+	my $data=shift;
+
+	my @package_data;
+	my %packdata;
+	my $field = "package";
+	my $lastfield = "package";
+
+	# start extremely primitive xml parser ;)
+	for (@$data){
+      next if ( /^<\?xml/ );
+	  for (split ('>',$_)) {
+		$_ =~ s/^\s*(.*?)\s*$/$1/s;
+		if ( /^<([^\ ]*)\ (.*)/ ) {
+			$lastfield = $1;
+			$field .= ".$lastfield";
+			my $trail = $2;
+			my $field_ends = 0;
+			$field_ends = 1 if ( $trail =~ /\/$/ );
+			$trail =~ s/\/$//;
+			for (split('\ ',$trail)) {
+				my ($key,$val) = split ('=',$_);
+				$val =~ s/^\"(.*)\"$/$1/;
+				$packdata{"$field.$key"} = $val;
+				#print "'$field.$key' val = \"".$packdata{"$field.$key"}."\" (3)\n";
+			}
+			if ( $field_ends ) {
+				if ( $field =~ /\./ ) {
+					$field =~ s/\.[^\.]*$//;
+					$lastfield = $field;
+					$lastfield =~ s/^.*([^\.]*)$/$1/;
+				} else {
+					$field = "package";
+					$lastfield = "package";
+					if ($packdata{'package.name'}) {
+						my %pack_data_tmp = %packdata;
+						push @package_data, \%pack_data_tmp;
+					}
+					%packdata = ();
+				}
+			}
+		} elsif ( /^<\/(.*)/ ) {
+			if ( $field =~ /\./ ) {
+				$field =~ s/\.[^\.]*$//;
+				$lastfield = $field;
+				$lastfield =~ s/^.*([^\.]*)$/$1/;
+			} else {
+				$field = "package";
+				$lastfield = "package";
+				if ($packdata{'package.name'}) {
+					my %pack_data_tmp = %packdata;
+					push @package_data, \%pack_data_tmp;
+				}
+				%packdata = ();
+			}
+		} elsif ( /^<([^\ >]*)/ ) {
+		   my $tfield = $1;
+		   if ( $tfield !~ /\/$/ ) {
+				$field .= ".$tfield";
+				$lastfield = $tfield;
+		   }
+		} elsif ( /^([^<]*)<\/$lastfield/ ) {
+			$packdata{"$field"} = $1;
+			#print "'$field' val = \"".$packdata{"$field"}."\" (2)\n";
+			if ( $field =~ /\./ ) {
+				$field =~ s/\.[^\.]*$//;
+				$lastfield = $field;
+				$lastfield =~ s/^.*([^\.]*)$/$1/;
+			} else {
+				$field = "package";
+				$lastfield = "package";
+				if ($packdata{'package.name'}) {
+					my %pack_data_tmp = %packdata;
+					push @package_data, \%pack_data_tmp;
+				}
+				%packdata = ();
+			}
+		} elsif ( /^(.*)=(.*)$/ ) {
+		   my $key = $1;
+		   my $val = $2;
+		   $val =~ s/^\"(.*)\"$/$1/;
+		   $packdata{"$field.$key"} = $val;
+		   #print "'$field.$key' val = \"".$packdata{"$field.$key"}."\" lastfield = \"$lastfield\" (1)\n";
+		} 
+      }
+	}
+	# end extremely primitive xml parser ;)
+	# for debugging only
+	print "parsePrimaryXml: ".Dumper($package_data[0]) if ($DEBUG);
+	return \@package_data;
+}
+
+sub updateRepo ($) {
+	my $basedir=shift;
+	my $res=0;
+    my $savedir=tempdir( "createpatch-XXXXXX", TMPDIR => 1, CLEANUP => 1 );
+	if (! -x '/usr/bin/createrepo'){
+        warn "/usr/bin/createrepo not found or not executable.\n";
+        warn "Please check if package createrepo is installed on your system.\n";
+		return 1;
+	}
+	if ( opendir ( DIR, "$basedir")){
+		for (readdir(DIR)) {
+		    unlink "$basedir/repodata/$_" if ( /\.key$/ || /\.asc$/ );
+		    next unless ( /^patch/ || /^product/ );
+		    if ( /^patches.xml/ ) {
+				unlink "$basedir/repodata/patches.xml";
+				next;
+		    }
+		    link "$basedir/repodata/$_","$savedir/$_";
+	    	unlink "$basedir/repodata/$_";
+		}
+		closedir (DIR);
+	}
+	$res=system("/usr/bin/createrepo -x \"*.patch.rpm\" -x \"*.delta.rpm\" $basedir 1>&2 2>/dev/null");
+	print "createrepo: $res - by running /usr/bin/createrepo -x \"*.patch.rpm\" -x \"*.delta.rpm\" $basedir 1>&2 2>/dev/null\n" if ($DEBUG);
+    if ( opendir ( DIR, "$savedir" ) ) {
+		for (readdir(DIR)) {
+	    	link "$savedir/$_","$basedir/repodata/$_";
+		    unlink "$savedir/$_";
+		}
+		closedir (DIR);
+    }
+	return $res;
+}
+
+sub GeneratePatchesXml($) {
+    my ($patches_directory) = @_;
+
+    opendir(PDIR,"$patches_directory");
+    my @all_patches = grep {/^patch-.*\.xml$/} readdir(PDIR);
+    closedir(PDIR);
+
+    if (@all_patches) {
+        open (NEWDIR,">$patches_directory/patches.xml");
+        print NEWDIR "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+        print NEWDIR "<patches xmlns=\"http://novell.com/package/metadata/suse/patches\">\n";
+        my $pdirname = $patches_directory;
+        $pdirname =~ s/^.*\///;
+        for my $current_patch (@all_patches) {
+            my ($checksum,$dummy) = split('\s+',`sha1sum "$patches_directory/$current_patch"`);
+            my $category = "";
+            if ($patches_directory =~ /\/you/) {
+                open(PATCH,"$patches_directory/$current_patch");
+                my @TMP = <PATCH>;
+                close(PATCH);
+                chomp(@TMP);
+                $category = (grep { /<category>/ } @TMP)[0];
+                if ($category) {
+                $category =~ s/^\s+//;
+                $category =~ s/\s+$//;
+                $category = "    $category\n";
+                }
+                LOG("$current_patch: $category",7);
+            }
+            $current_patch =~ s/.xml$//;
+            my $name = $current_patch;
+            $name =~ s/^patch-//;
+            print NEWDIR "  <patch id=\"$name\">\n";
+            print NEWDIR "    <checksum type=\"sha\">$checksum</checksum>\n";
+            print NEWDIR "    <location href=\"$pdirname/$current_patch.xml\"/>\n$category";
+            print NEWDIR "  </patch>\n";
+        }
+        print NEWDIR "</patches>\n";
+        close (NEWDIR);
+    } else {
+        LOG("GeneratePatchesXml: no patches found, removing patches.xml",3);
+        unlink "$patches_directory/patches.xml";
+    }
+}
+
+sub GenerateRepomdXml($) {
+    my ($patches_directory) = @_;
+    opendir(PDIR,"$patches_directory");
+    my @all_patches = grep {/\.xml(\.gz)?$/} readdir(PDIR);
+    closedir(PDIR);
+    open (NEWDIR,">$patches_directory/repomd.xml");
+    print NEWDIR "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    print NEWDIR "<repomd xmlns=\"http://linux.duke.edu/metadata/repo\">\n";
+    my $pdirname = $patches_directory;
+    $pdirname =~ s/^.*\///;
+    for (@all_patches) {
+        next if (/^patch-/);
+        next if (/^repomd/);
+        my ($checksum,$dummy) = split('\s+',`sha1sum "$patches_directory/$_"`);
+        my $o_checksum = $checksum;
+        if ( /\.gz/ ) {
+            ($o_checksum,my $dummy) = split('\s+',`gzip -dc "$patches_directory/$_" | sha1sum`);
+        }
+        my $timestamp = stat("$patches_directory/$_")->mtime;
+        my $filename = $_;
+        $_ =~ s/.xml(\.gz)?$//;
+        print NEWDIR "  <data type=\"$_\">\n";
+        print NEWDIR "    <location href=\"$pdirname/$filename\"/>\n";
+        print NEWDIR "    <checksum type=\"sha\">$checksum</checksum>\n";
+        print NEWDIR "    <timestamp>$timestamp</timestamp>\n";
+        print NEWDIR "    <open-checksum type=\"sha\">$o_checksum</open-checksum>\n";
+        print NEWDIR "  </data>\n";
+    }
+    print NEWDIR "</repomd>\n";
+    close ( NEWDIR );
+}
+
+sub xml_escape($) {
+    my ($text) = @_;
+    $text =~ s/&/&amp;/sg;
+    $text =~ s/</&lt;/sg;
+    $text =~ s/>/&gt;/sg;
+    $text =~ s/"/&quot;/sg;
+    #$text =~ s/([\x80-\xff])/$1 lt "\xC0" ? "\xC2$1" : "\xC3".chr(ord($1)-64)/ge;
+    return $text;
+}
+
+# poor mans utf8 converter
+sub to_xml_utf8 {
+	my ($in_text) = @_;
+    my $text = xml_escape($in_text);
+    $text =~ s/([\x80-\xff])/$1 lt "\xC0" ? "\xC2$1" : "\xC3".chr(ord($1)-64)/ge;
+    return $text;
+}
+
+sub trim($){
+	my $string = shift;
+	$string =~ s/^\s*//;
+	$string =~ s/\s*$//;
+	return $string;
+}
+
+sub ParseConfig($) {
+	my $conf = shift;
+	my %config;
+	open(CONF,"$conf") or die ("Could not open $conf: $!\n");
+	while (<CONF>){
+		next if (/^#/);
+		next if /^\s*$/;
+
+		my ($tag, $data);
+		if (/=/){
+			($tag,$data)=split(/\s*=\s*/, $_, 2);
+			$tag=trim($tag);
+			$data=trim($data);
+		} elsif (/:/){
+			($tag,$data) = split(/\s*:\s*/, $_, 2);
+			$tag=trim($tag);
+            $data=trim($data);
+		} elsif (/ /){
+			($tag, $data) = split(/\s*/, $_, 2);
+			$tag=trim($tag);
+			$data=trim($data);
+		}
+		$config{$tag}="$data";
+	}
+	close(CONF);
+	return \%config;
+}
+
+sub writePatchFile($$$) {
+  my $configref=shift;
+  my $repodata=shift;
+  my $package_dataref=shift;
+  my %config=%$configref;
+  my @package_data=@$package_dataref;
+
+  if ($#packagelist ge 0) {
+    my $timestamp = time;
+    my $iteration = $config{'patch_version'};
+    while ( -f "$repodata/patch-$config{'patch_id'}-$config{'patch_name'}-$iteration.xml" ) {
+		warn ("patch-$config{'patch_id'}-$config{'patch_name'}-$iteration.xml does already exist, increasing version\n");
+		$iteration++;
+    }
+
+    # patch header, mostly static
+    my $patch_text = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    $patch_text .= "<patch\n    xmlns=\"http://novell.com/package/metadata/suse/patch\"\n";
+    $patch_text .= "    xmlns:yum=\"http://linux.duke.edu/metadata/common\"\n";
+    $patch_text .= "    xmlns:rpm=\"http://linux.duke.edu/metadata/rpm\"\n";
+    $patch_text .= "    xmlns:suse=\"http://novell.com/package/metadata/suse/common\"\n";
+    $patch_text .= "    patchid=\"$config{'patch_id'}-$config{'patch_name'}-$iteration\"\n    timestamp=\"$timestamp\"\n    engine=\"1.0\">\n";
+    $patch_text .= "  <yum:name>$config{'patch_id'}-$config{'patch_name'}</yum:name>\n";
+    $patch_text .= "  <summary lang=\"en\">".xml_escape($config{'patch_summary'})."</summary>\n";
+    $patch_text .= "  <description lang=\"en\">".xml_escape($config{'patch_description'})."</description>\n";
+    $patch_text .= "  <yum:version ver=\"$iteration\" rel=\"0\"/>\n";
+    $patch_text .= "  <rpm:requires>\n";
+
+    my %seen_already;
+    for (@package_data) {
+	    # this package wanted in patch ?
+    	my $pack_name = $_->{'package.name'};
+	    my $long_name = $_->{'package.location.href'};
+	    $long_name =~ s/^.*\/([^\/]*)/$1/;
+    	next unless grep { $_ eq $pack_name || $_ eq $long_name } @packagelist;
+
+    	# duplicate filter
+	    next if ( $seen_already{"$_->{'package.name'}-$_->{'package.version.epoch'}-$_->{'package.version.ver'}-$_->{'package.version.rel'}"} );
+    	$seen_already{"$_->{'package.name'}-$_->{'package.version.epoch'}-$_->{'package.version.ver'}-$_->{'package.version.rel'}"} = 1;
+
+    	# make the patch require the atom associated with this package
+	    $patch_text .= "    <rpm:entry kind=\"atom\" name=\"$_->{'package.name'}\"";
+        $patch_text .= " epoch=\"$_->{'package.version.epoch'}\"";
+        $patch_text .= " ver=\"$_->{'package.version.ver'}\"";
+        $patch_text .= " rel=\"$_->{'package.version.rel'}\" flags=\"EQ\"/>\n";
+    }
+    $patch_text .= "  </rpm:requires>\n";
+
+    # do we have any supplements tags at all
+    if ($#patchsupplements ge 0){
+		$patch_text .= "  <rpm:supplements>\n";
+		for (@patchsupplements){
+			$patch_text .= "    <rpm:entry kind=\"patch\" name=\"$_\"/>\n";
+		}
+		$patch_text .= "  </rpm:supplements>\n";
+    }
+
+    $patch_text .="  <category>$config{'category'}</category>\n";
+
+    if ( $config{'license_file'} && -f "$config{'license_file'}" ) {
+		$patch_text .= "  <license-to-confirm>\n";
+		open ( LIC, "< $config{'license_file'}");
+		while ( <LIC> ) {
+		    $patch_text .= xml_escape($_);
+		}
+		close ( LIC );
+		$patch_text .= "  </license-to-confirm>\n";
+    }
+    $patch_text .= "  <atoms>\n";
+
+    for (@package_data) {
+		# this package wanted in patch ?
+		my $pack_name = $_->{'package.name'};
+		my $long_name = $_->{'package.location.href'};
+		my $freshens;
+		$long_name =~ s/^.*\/([^\/]*)/$1/;
+		next unless grep { $_ eq $pack_name || $_ eq $long_name } @packagelist;
+		# create atom data, mostly just copies from primary package data
+		$patch_text .= "    <package xmlns=\"http://linux.duke.edu/metadata/common\" type=\"rpm\">\n";
+		$patch_text .= "      <name>$_->{'package.name'}</name>\n";
+		$patch_text .= "      <arch>$_->{'package.arch'}</arch>\n";
+		$patch_text .= "      <version epoch=\"$_->{'package.version.epoch'}\" ver=\"$_->{'package.version.ver'}\" rel=\"$_->{'package.version.rel'}\"/>\n";
+		$patch_text .= "      <checksum type=\"sha\" pkgid=\"YES\">$_->{'package.checksum'}</checksum>\n";
+		$patch_text .= "      <time file=\"$_->{'package.time.file'}\" build=\"$_->{'package.time.build'}\"/>\n";
+		$patch_text .= "      <size package=\"$_->{'package.size.package'}\" installed=\"$_->{'package.size.installed'}\" archive=\"$_->{'package.size.archive'}\"/>\n";
+		$patch_text .= "      <location href=\"$_->{'package.location.href'}\"/>\n";
+		# here starts the association of the atom to the real package
+		$patch_text .= "      <format>\n        <rpm:requires>\n";
+		$patch_text .= "          <rpm:entry kind=\"package\"";
+		$patch_text .= " name=\"$_->{'package.name'}\"";
+		$patch_text .= " epoch=\"$_->{'package.version.epoch'}\"";
+		$patch_text .= " ver=\"$_->{'package.version.ver'}\"";
+		$patch_text .= " rel=\"$_->{'package.version.rel'}\"";
+		$patch_text .= " flags=\"GE\"/>\n";
+		$patch_text .= "        </rpm:requires>\n";
+		# now have the atom pulled in, if this package is installed on the system
+		$patch_text .= "        <suse:freshens>\n";
+		# do we need to override the freshens tag
+		if ($#pkgrefresh ge 0){
+			for(@pkgrefresh){
+				$patch_text .= "          <suse:entry kind=\"package\" name=\"$_\"/>\n";
+			}
+		}
+		else{
+			$patch_text .= "          <suse:entry kind=\"package\" name=\"$_->{'package.name'}\"/>\n";
+		}
+		$patch_text .= "        </suse:freshens>\n      </format>\n    </package>\n";
+    }
+
+    $patch_text .= "  </atoms>\n</patch>\n";
+    open ( PATCH, "> $repodata/patch-$config{'patch_id'}-$config{'patch_name'}-$iteration.xml");
+    print PATCH $patch_text;
+    close ( PATCH );
+  }
+}
+
+#
+# write out the xml file and gzip it, atomic
+#
+sub UpdateXmlFile {
+    my ($patches_directory,$xname,$data) = @_;
+    open ( PRIMARY, "| gzip > $patches_directory/$xname.xml.gz.new");
+    print PRIMARY "$data->{header}\n";
+    # actually faster this way according to testing
+    for (@{$data->{newdata}}) {
+        print PRIMARY "$_\n" if defined $_;
+    }
+    print PRIMARY "$data->{footer}\n";
+    close ( PRIMARY );
+    rename ( "$patches_directory/$xname.xml.gz.new", "$patches_directory/$xname.xml.gz");
+    unlink ("$patches_directory/$xname.xml") if ( -f "$patches_directory/$xname.xml" );
+}
+
+#
+# extremely primitive xml input: split records at "<package "
+#
+sub ReadXmlFile {
+    my ($patches_directory,$xname,$dataname) = @_;
+    my @PRIMARY;
+
+    if ( -f "$patches_directory/$xname.xml.gz" ) {
+        open ( PRIMARY, "zcat $patches_directory/$xname.xml.gz |");
+    } else {
+        open ( PRIMARY, "$patches_directory/$xname.xml");
+    }
+    {
+        local $/ = "<package ";
+        @PRIMARY = <PRIMARY>;
+        chomp (@PRIMARY);
+    }
+    close ( PRIMARY );
+
+    unless ( $PRIMARY[1] ) {
+        $PRIMARY[0] =~ s/<\/$dataname>//g;
+        push @PRIMARY, "nil></package>\n</$dataname>";
+    }
+    my $header_primary = shift(@PRIMARY);
+    $header_primary =~ s/^\s*(.*?)\s*$/$1/s;
+
+    my $footer_primary = $PRIMARY[$#PRIMARY];
+    $PRIMARY[$#PRIMARY] =~ s/<\/package\>.*$/<\/package\>/s;
+    $footer_primary =~ s/^.*<\/package>//s;
+    $footer_primary =~ s/^\s*(.*?)\s*$/$1/s;
+
+    return ($header_primary,$footer_primary,\@PRIMARY);
+}
+
+sub cleanup(){
+	unlink "$LOCKFILE" if ( -f "$LOCKFILE");
+}
+
+# simple logfile writer
+sub LOG {
+	my $entry = shift;
+	my $level = shift || 1;
+	my $xtime=`date`;
+	chomp($xtime);
+	if ( $level lt $config{'loglevel'} ){
+		print OUTPUT_LOG "$xtime: $entry\n";
+	}
+	print "$xtime: $entry\n" if ($DEBUG);
+}
+
+#
+# helper functions for GetPackageDataFromRpm
+#
+# only weak deps (enhances, suggests)
+sub filter_weak {
+    my ($tn, $tf) = @_;
+    my @tf = @{$tf || []};
+    my @res;
+    for (@{$tn || []}) {
+        push @res, $_ unless (shift @tf) & 0x8000000;
+    }
+    return @res;
+}
+
+# only strong ones (recommends, supplements)
+sub filter_strong {
+    my ($tn, $tf) = @_;
+    my @tf = @{$tf || []};
+    my @res;
+    for (@{$tn || []}) {
+        push @res, $_ if (shift @tf) & 0x8000000;
+    }
+    return @res;
+}
+
+# combine deps and their relations and flags
+sub add_flagsvers_special {
+    my $res = shift;
+    my $name = shift;
+    my $flags = shift;
+    my $vers = shift;
+    my $filter = shift;
+
+    my @raw_dep_names = @{$res->{$name} || []};
+    my @raw_dep_flags = @{$res->{$flags} || []};
+    my @raw_dep_vers = @{$res->{$vers} || []};
+    if ($filter && @raw_dep_flags) {
+        @raw_dep_names = $filter->(\@raw_dep_names, \@raw_dep_flags);
+        @raw_dep_vers  = $filter->(\@raw_dep_vers,  \@raw_dep_flags);
+        @raw_dep_flags = $filter->(\@raw_dep_flags, \@raw_dep_flags);
+    }
+    my @raw_provides = ();
+    for (@raw_dep_names) {
+        my %prov_line = ();
+        $prov_line{'name'} = $_;
+        my ($epoch, $version) = $raw_dep_vers[0] =~ /^(?:(\d+):)?(.*?)$/;
+        my $release = '';
+        ($version, $release) = ($1, $2) if $version =~ /^(.*)-(.*?)$/;
+        $prov_line{'epoch'} = $epoch;
+        $prov_line{'ver'} = $version;
+        $prov_line{'rel'} = $release;
+        if (@raw_dep_flags && ($raw_dep_flags[0] & 0xe) && @raw_dep_vers) {
+            my @rels = qw{FALSE FALSE LT LT GT GT NE NE EQ EQ LE LE GE GE TRUE TRUE};
+            $prov_line{'flags'} = $rels[$raw_dep_flags[0] & 0xe];
+        }
+        if (@raw_dep_flags  && $raw_dep_flags[0] & 64) {
+            $prov_line{'pre'} = 1;
+        }
+        shift @raw_dep_flags;
+        shift @raw_dep_vers;
+        push @raw_provides, \%prov_line;
+    }
+    return \@raw_provides;
+}
+
+# find out all about the given package
+sub GetPackageDataFromRpm {
+    my ($package_file) = @_;
+    my %package_data = ();
+    my $dummy = "";
+    $package_data{"fullpath"} = $package_file;
+    $package_file =~ /.*\/([^\/]*)$/;
+    $package_data{"basename"} = $1;
+    $package_data{"filesize"} = stat($package_file)->size;
+    $package_data{"filetime"} = stat($package_file)->mtime;
+    ($package_data{"checksum_sha"},$dummy) = split('\s+',`sha1sum $package_file`);
+    my %res = RPMQ::rpmq_many($package_file,'NAME','EPOCH','VERSION','RELEASE','SIZE','BUILDTIME','GROUP','ARCH','LICENSE',
+                                'SOURCERPM','PROVIDENAME','PROVIDEFLAGS','PROVIDEVERSION',
+                                'REQUIRENAME','REQUIREFLAGS','REQUIREVERSION',
+                                'CONFLICTNAME','CONFLICTFLAGS','CONFLICTVERSION',
+                                'OBSOLETENAME','OBSOLETEFLAGS','OBSOLETEVERSION',
+                                'SUGGESTSNAME','SUGGESTSFLAGS','SUGGESTSVERSION',
+                                'ENHANCESNAME','ENHANCESFLAGS','ENHANCESVERSION',
+                                'FILENAMES','FILEMODES','SUMMARY','DESCRIPTION','HEADERSTART','HEADEREND',
+                                'CHANGELOGTIME','CHANGELOGNAME','CHANGELOGTEXT','PACKAGER','VENDOR','URL',
+                                'ARCHIVESIZE','SIGTAG_PAYLOADSIZE','BUILDHOST');
+    $package_data{"name"} = ($res{'NAME'} || [])->[0];
+    $package_data{"epoch"} = ($res{'EPOCH'} || [])->[0];
+    $package_data{"epoch"} = "0" unless ($package_data{"epoch"});
+    $package_data{"version_only"} = ($res{'VERSION'} || [])->[0];
+    $package_data{"release"} = ($res{'RELEASE'} || [])->[0];
+    $package_data{"version"} = "$package_data{version_only}-$package_data{release}";
+    $package_data{"rpmsize"} = ($res{'SIZE'} || [])->[0];
+    $package_data{"archivesize"} = ($res{'ARCHIVESIZE'} || [])->[0];
+    $package_data{"archivesize"} = ($res{'SIGTAG_PAYLOADSIZE'} || [])->[0] unless ($package_data{"archivesize"});
+    $package_data{"buildtime"} = ($res{'BUILDTIME'} || [])->[0];
+    $package_data{"rpmgroup"} = ($res{'GROUP'} || [])->[0];
+    $package_data{"rpmarch"} = ($res{'ARCH'} || [])->[0];
+    $package_data{"license"} = ($res{'LICENSE'} || [])->[0];
+    $package_data{"sourcerpm"} = ($res{'SOURCERPM'} || [])->[0];
+    $package_data{"packager"} = ($res{'PACKAGER'} || [])->[0];
+    $package_data{"vendor"} = ($res{'VENDOR'} || [])->[0];
+    $package_data{"url"} = ($res{'URL'} || [])->[0];
+    $package_data{"rpmarch"} = "src" unless ( $package_data{"sourcerpm"} );
+    $package_data{"headerstart"} = $res{'HEADERSTART'};
+    $package_data{"headerend"} = $res{'HEADEREND'};
+    $package_data{"summary"} = ($res{'SUMMARY'} || [])->[0];
+    $package_data{"buildhost"} = ($res{'BUILDHOST'} || [])->[0];
+    $package_data{"description"} = join(' ',@{$res{'DESCRIPTION'}});
+    my @dirs = ();
+    my @files = ();
+    for (@{$res{'FILENAMES'}}) {
+    if ( @{$res{'FILEMODES'}}[0] & 0040000 ) {
+        push @dirs, $_;
+    } else {
+        push @files, $_;
+    }
+    shift @{$res{FILEMODES}}
+    }
+    $package_data{"rpmlistdirs"} = \@dirs;
+    $package_data{"rpmlistfiles"} = \@files;
+    # raw deps
+	$package_data{"providesraw"} = add_flagsvers_special(\%res,'PROVIDENAME','PROVIDEFLAGS','PROVIDEVERSION');
+    $package_data{"requiresraw"} = add_flagsvers_special(\%res,'REQUIRENAME','REQUIREFLAGS','REQUIREVERSION');
+    $package_data{"conflictsraw"} = add_flagsvers_special(\%res,'CONFLICTNAME','CONFLICTFLAGS','CONFLICTVERSION');
+    $package_data{"obsoletesraw"} = add_flagsvers_special(\%res,'OBSOLETENAME','OBSOLETEFLAGS','OBSOLETEVERSION');
+    $package_data{"supplementsraw"} = add_flagsvers_special(\%res,'ENHANCESNAME','ENHANCESFLAGS','ENHANCESVERSION', \&filter_strong);
+    $package_data{"enhancesraw"} = add_flagsvers_special(\%res,'ENHANCESNAME','ENHANCESFLAGS','ENHANCESVERSION', \&filter_weak);
+    $package_data{"recommendsraw"} = add_flagsvers_special(\%res,'SUGGESTSNAME','SUGGESTSFLAGS','SUGGESTSVERSION', \&filter_strong);
+    $package_data{"suggestsraw"} = add_flagsvers_special(\%res,'SUGGESTSNAME','SUGGESTSFLAGS','SUGGESTSVERSION', \&filter_weak);
+
+    # cooked deps
+    RPMQ::rpmq_add_flagsvers(\%res,'PROVIDENAME','PROVIDEFLAGS','PROVIDEVERSION');
+    RPMQ::rpmq_add_flagsvers(\%res,'REQUIRENAME','REQUIREFLAGS','REQUIREVERSION');
+    $package_data{"provides"} = join(' ',@{$res{'PROVIDENAME'}});
+    $package_data{"requires"} = join(' ',@{$res{'REQUIRENAME'}});
+    $package_data{"provides"} =~ s/\s+/ /g;
+    $package_data{"provides"} =~ s/\s+$//g;
+    $package_data{"requires"} =~ s/\s+/ /g;
+    $package_data{"requires"} =~ s/\s+$//g;
+    $package_data{"changelogtime"} = $res{'CHANGELOGTIME'};
+    $package_data{"changelogname"} = $res{'CHANGELOGNAME'};
+    $package_data{"changelogname"} =~ s/^- //;
+    $package_data{"changelogtext"} = $res{'CHANGELOGTEXT'};
+    return %package_data;
+}
+
+
+sub ReadFileToHash($){
+	my $file=shift;
+	my %temp;
+	open(FILE,"< $file") or return undef;
+	while (<FILE>){
+		chomp;
+		last if $_ =~ /^:END/ ;
+	    next if ( $_ =~ /^\#/ );
+    	next if ( $_ =~ /^\s$/ );
+		my ($le,$ri) = split (/:/,$_,2);
+		$le=trim($le);
+		$ri=trim($ri);
+		$ri=~ s/\\n/\n/g;
+		$temp{$le}=$ri;
+	}	
+	close(FILE);
+	return \%temp;
+}	
+
+#
+# create package information in xml format as given for repomd
+#
+sub PackageDataToXML {
+my ($curpack) = @_;
+    my $boilerplate .= "    <package xmlns=\"http://linux.duke.edu/metadata/common\" type=\"rpm\">\n";
+    my $header = "      <name>".$curpack->{"name"}."</name>\n";
+    $header .= "      <arch>".$curpack->{"rpmarch"}."</arch>\n";
+    $header .= "      <version epoch=\"$curpack->{epoch}\" ver=\"$curpack->{version_only}\" rel=\"$curpack->{release}\"/>\n";
+    $header .= "      <checksum type=\"sha\" pkgid=\"YES\">".$curpack->{"checksum_sha"}."</checksum>\n";
+    $header .= "      <summary lang=\"en\">".to_xml_utf8($curpack->{summary})."</summary>\n";
+    $header .= "      <description lang=\"en\">".to_xml_utf8($curpack->{description})."</description>\n";
+    $header .= "      <packager>$curpack->{packager}</packager>\n";
+    $header .= "      <url>".to_xml_utf8($curpack->{url})."</url>\n";
+    $header .= "      <time file=\"$curpack->{filetime}\" build=\"$curpack->{buildtime}\"/>\n";
+    $header .= "      <size package=\"$curpack->{filesize}\" installed=\"$curpack->{rpmsize}\" archive=\"$curpack->{archivesize}\"/>\n";
+    $header .= "      <location href=\"rpm/$curpack->{rpmarch}/$curpack->{basename}\"/>\n";
+
+    #
+    ## FORMAT START
+    #
+    my $data = "        <rpm:license>$curpack->{license}</rpm:license>\n";
+    $data .= "        <rpm:vendor>$curpack->{vendor}</rpm:vendor>\n";
+    $data .= "        <rpm:group>$curpack->{rpmgroup}</rpm:group>\n";
+    $data .= "        <rpm:buildhost>$curpack->{buildhost}</rpm:buildhost>\n";
+    if ( $curpack->{sourcerpm} ) {
+        $data .= "        <rpm:sourcerpm>$curpack->{sourcerpm}</rpm:sourcerpm>\n";
+    } else {
+        $data .= "        <rpm:sourcerpm/>\n";
+    }
+    $data .= "        <rpm:header-range start=\"$curpack->{headerstart}\" end=\"$curpack->{headerend}\"/>\n";
+    for my $dep_type (qw{provides requires conflicts obsoletes suggests enhances recommends supplements}) {
+    my $dep_list = $curpack->{"${dep_type}raw"};
+    if ($dep_list && @$dep_list) {
+        $data .= "        <rpm:$dep_type>\n";
+        for my $dep_data (@$dep_list) {
+            $data .= "          <rpm:entry";
+            # name,epoch,ver,rel,pre,flags
+            for (qw{name flags epoch ver rel pre}) {
+                $data .= " $_=\"$dep_data->{$_}\"" if defined ($dep_data->{$_}) && $dep_data->{$_} ne "";
+            }
+            $data .= "/>\n";
+        }
+        $data .= "        </rpm:$dep_type>\n";
+    }
+    }
+    for (grep {/.*bin\/.*/ || /^\/etc\/.*/} @{$curpack->{rpmlistdirs}} ) {
+        $data .= "        <file type=\"dir\">$_</file>\n";
+    }
+    for (grep {/.*bin\/.*/ || /^\/usr\/lib\/sendmail$/ || /^\/etc\/.*/} @{$curpack->{rpmlistfiles}} ) {
+        $data .= "        <file>$_</file>\n";
+    }
+    #
+    ## FORMAT END
+    #
+    my $filelist = "";
+    for (@{$curpack->{rpmlistdirs}}) {
+        $filelist .= "        <file type=\"dir\">".to_xml_utf8($_)."</file>\n";
+    }
+    for (@{$curpack->{rpmlistfiles}}) {
+        $filelist .= "        <file>".to_xml_utf8($_)."</file>\n";
+    }
+    return ($boilerplate , $header, $data, $filelist);
+}
+
+#
+# regenerate the updateinfo.xml.gz file: scan all updateinfo-foo.xml and include literally
+#
+sub GenerateUpdateinfoXml {
+    my ($patches_directory) = @_;
+
+    opendir(PDIR,"$patches_directory/../repoparts");
+    my @all_files = readdir(PDIR);
+    my @all_patches = grep {/^updateinfo-.*\.xml$/} @all_files;
+    my @all_deltas = grep {/^deltainfo-.*\.xml$/} @all_files;
+    closedir(PDIR);
+
+    if (@all_patches) {
+        # concat for updateinfo
+        open (NEWDIR,"| gzip > $patches_directory/updateinfo.xml.gz.new");
+        print NEWDIR "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+        print NEWDIR "<updates xmlns=\"http://novell.com/package/metadata/suse/updateinfo\">\n";
+        for my $current_patch (@all_patches) {
+            open (PATCH, "< $patches_directory/../repoparts/$current_patch");
+            print NEWDIR join('',grep {$_ !~ /^<.xml version/} <PATCH>);
+            close (PATCH);
+        }
+        print NEWDIR "</updates>\n";
+        close (NEWDIR);
+        my $xname = "updateinfo";
+        rename ( "$patches_directory/$xname.xml.gz.new", "$patches_directory/$xname.xml.gz");
+        unlink ("$patches_directory/$xname.xml") if ( -f "$patches_directory/$xname.xml" );
+        # concat for deltainfo
+        open (NEWDIR,"| gzip > $patches_directory/deltainfo.xml.gz.new");
+        print NEWDIR "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+        print NEWDIR "<deltainfo>\n";
+        for my $current_delta (@all_deltas) {
+            open (PATCH, "< $patches_directory/../repoparts/$current_delta");
+            print NEWDIR join('',grep {$_ !~ /^<.xml version/} <PATCH>);
+            close (PATCH);
+        }
+        print NEWDIR "</deltainfo>\n";
+        close (NEWDIR);
+        $xname = "deltainfo";
+        rename ( "$patches_directory/$xname.xml.gz.new", "$patches_directory/$xname.xml.gz");
+        unlink ("$patches_directory/$xname.xml") if ( -f "$patches_directory/$xname.xml" );
+        unlink ("$patches_directory/patches.xml") if ( -f "$patches_directory/patches.xml" );
+    } else {
+        LOG ("GenerateUpdateinfoXml: no updates found, removing updateinfo.xml",2);
+        unlink "$patches_directory/updateinfo.xml";
+        unlink "$patches_directory/updateinfo.xml.gz";
+    }
+}
+
+###############################################################################
+# Main
+###############################################################################
+Getopt::Long::Configure('bundling');
+
+GetOptions(
+    'h|help' => \$print_help,
+    'b|basedir=s' => \$config{'basedir'},
+    'c|configfile=s' => \$configfile,
+	'C|category=s' => \$config{'category'},
+	'e|do_susedata' => \$config{'do_susedata'},
+	'i|patch_id=s' => \$config{'patch_id'},
+    'l|logfile=s'  => \$config{'logfile'},
+    'k|keywordfile=s' => \$config{'keywordfile'},
+	'n|patch_name=s' => \$config{'patch_name'},
+	'v|patch_version=i' => \$config{'patch_version'},
+	's|patch_summary=s' => \$config{'patch_summary'},
+	'd|patch_description=s' => \$config{'patch_description'},
+	'u|update_repo' => \$config{'update_repo'},
+	'S|do_signing' => \$config{'do_signing'},
+	'I|sign_id=s' => \$config{'sign_id'},
+	'L|license_file=s' => \$config{'license_file'},
+	'p|packagelist=s' => \@packagelist,
+	'patchsupplements=s' => \@patchsupplements,
+	'pkgfreshens=s' => \@pkgrefresh,
+);
+
+usage(0) if ($print_help);
+
+if ("$configfile" ne ""){
+	if (-r "$configfile"){
+		my $configref=ParseConfig("$configfile");
+        %config=%$configref;
+	} else {
+		die ("Could not open $configfile\n");
+	}
+}
+$config{'patch_id'} =~ s/\./_/g;
+
+#die ("Lockfile ($LOCKFILE) already exists at ".ctime()."\n") if (-f "$LOCKFILE");
+#open (LOCK,">$LOCKFILE") || die "Cannot write lockfile $LOCKFILE : $!\n";
+#print LOCK "$$\n";
+#close(LOCK);
+
+$::SIG{"__DIE__"} = sub {
+    die (@_) if $^S;
+    \&cleanup;
+};
+
+open ( OUTPUT_LOG , ">>$config{'logfile'}");
+select (OUTPUT_LOG); $| = 1; select (STDOUT);
+
+my $repodata = "$config{'basedir'}/repodata";
+my $first_package = "";
+
+if ( @packagelist && $packagelist[0] ){
+	$first_package = $packagelist[0];
+	@packagelist=split(/,/,join(',',@packagelist));
+}
+@patchsupplements=split(/,/,join(',',@patchsupplements)) if ( @patchsupplements );
+@pkgrefresh=split(/,/,join(',',@pkgrefresh)) if (@pkgrefresh);
+
+if ( $config{'patch_name'} eq "usefirst" ) {
+    $config{'patch_name'} = "$first_package" if ( "$first_package" );
+}
+
+if ($DEBUG){
+	print "config: ".Data::Dumper->Dump([\%config]);
+	for (@patchsupplements){
+		print "patchsupplements : $_\n";
+	}
+	for (@pkgrefresh){
+		print "pkgrefresh       : $_\n";
+	}
+	for (@packagelist){
+		print "packagelist      : $_\n";
+	}
+}
+
+LOG("Start creation for $repodata",1);
+my $res=updateRepo("$config{'basedir'}") if ($config{'update_repo'});
+die "Could not update the Repository\n" if ($res);
+
+if ( -f "$repodata/primary.xml.gz" ) {
+    open ( PRIMARY, "zcat $repodata/primary.xml.gz |") || warn ("Could not open primary.xml.gz : $!\n");
+} else {
+    open ( PRIMARY, "$repodata/primary.xml") || warn ("Could not open primary.xml : $!\n");
+}
+
+my @PRIMARY;
+{
+    local $/ = "<package ";
+    @PRIMARY = <PRIMARY>;
+    chomp (@PRIMARY);
+}
+close ( PRIMARY );
+
+my $package_dataref=parsePrimaryXml(\@PRIMARY);
+my @package_data=@$package_dataref;
+
+for (@package_data) {
+    my $pack_name = $_->{'package.name'};
+    my $long_name = $_->{'package.location.href'};
+    $long_name =~ s/^.*\/([^\/]*)/$1/;
+    next unless ( $pack_name eq $first_package || $long_name eq $first_package );
+    # primitive approach: use summary and description of the first package found
+    $config{'patch_summary'} = $_->{'package.summary'} unless ($config{'patch_summary'});
+    $config{'patch_description'} = $_->{'package.description'} unless ($config{'patch_description'});
+}
+
+if ($config{'do_susedata'}){
+	my %xfiles = (  'susedata' => 'susedata',
+					'primary'  => 'metadata',
+					'filelists' => 'filelists',
+					'other'    => 'otherdata',
+				  );
+	our %data;
+	for my $name (sort(keys %xfiles)){
+		my $tag = $xfiles{$name};
+		if ( ! -f "$repodata/$name.xml.gz" && ! -f "$repodata/$name.xml"){
+			open (IDXFILE, ">$repodata/$name.xml") || die "Could not open $repodata/$name.xml : $!\n";
+			print IDXFILE "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+            print IDXFILE "<$tag xmlns=\"http://linux.duke.edu/metadata/$name\" packages=\"0\">\n";
+            print IDXFILE "<package nil></package></$tag>\n";
+            close ( IDXFILE );
+		}
+		($data{"${name}_header"},$data{"${name}_footer"},$data{"${name}_data"}) = ReadXmlFile("$repodata","$name","$tag");
+	}
+
+    my $number_packages = 0;
+    my $number_discarded = 0;
+    my %seen_rpms = ();
+    my %stat_all_rpms = ();
+    my @rpm_dirs;
+
+    if (opendir(D, "$repodata/../rpm")) {
+        @rpm_dirs = grep {!/^\./} readdir(D);
+        closedir D;
+    }
+    for my $rpm_dir (@rpm_dirs) {
+        if (opendir(D, "$repodata/../rpm/$rpm_dir")) {
+            for (grep { /^[^\.].*\.rpm/ } readdir(D)) {
+                $stat_all_rpms{"$repodata/../rpm/$rpm_dir/$_"} = lstat("$repodata/../rpm/$rpm_dir/$_");
+            }
+            closedir D;
+        }
+    }
+
+	LOG("Starting susedata creation",5);
+	my $valid_pkgids;
+
+	for my $index (0...$#{$data{'primary_data'}}) {
+        my $filename = $data{'primary_data'}->[$index];
+        my $pkgid = $data{'primary_data'}->[$index];
+        #
+        $filename =~ s/^[\s\S]*<location href="([^"]*)"[\s\S]*$/$1/;
+        $pkgid =~ s/^[\s\S]*<checksum type="sha" pkgid="YES">([^<]*)<[\s\S]*$/$1/;
+        my $filebase = $filename;
+        $filebase =~ s/^.*\///;
+        #
+        my $pack_ok = 0;
+        my $f_stat = $stat_all_rpms{"$repodata/../$filename"};
+		# get file time
+		if ( $f_stat ) {
+            my $fil_time = $f_stat->mtime;
+            my $rec_time = $data{'primary_data'}->[$index];
+            $rec_time =~ s/.*time file=\"([^\"]*).*/$1/s;
+            $pack_ok = 1 if ( $rec_time eq $fil_time );
+            LOG("$filename $rec_time $fil_time",5) unless $pack_ok;
+        }
+		if ( $pack_ok && $data{'filelists_data'}->[$index] && $data{'other_data'}->[$index] && $data{'filelists_data'}->[$index] =~ /pkgid="$pkgid"/ && $data{'other_data'}->[$index] =~ /pkgid="$pkgid"/ ) {
+            $data{'primary_data'}->[$index] =~ s/\s+$//s;
+            $data{'primary_data'}->[$index] = "    <package ".$data{'primary_data'}->[$index];
+            $data{'filelists_data'}->[$index] =~ s/\s+$//s;
+            $data{'filelists_data'}->[$index] = "<package ".$data{'filelists_data'}->[$index];
+            $data{'other_data'}->[$index] =~ s/\s+$//s;
+            $data{'other_data'}->[$index] = "<package ".$data{'other_data'}->[$index];
+
+            $seen_rpms{$filename} = 1;
+            $number_packages += 1;
+            $valid_pkgids->{$pkgid} = 1;
+		} else {
+			undef $data{'primary_data'}->[$index];
+            undef $data{'filelists_data'}->[$index];
+            undef $data{'other_data'}->[$index];
+
+            $number_discarded += 1;
+			LOG("discarding data for $filename",3);
+		}
+	}
+	for my $index (0...$#{$data{'suse_data'}}) {
+        my $pkgid = $data{'suse_data'}->[$index];
+        $pkgid =~ s/^.*pkgid=\"([^\"]*)\".*$/$1/s;
+        if ($valid_pkgids->{$pkgid}) {
+            $data{'suse_data'}->[$index] =~ s/\s+$//s;
+            $data{'suse_data'}->[$index] = "    <package ".$data{'suse_data'}->[$index];
+        } else {
+            undef $data{'suse_data'}->[$index];
+            LOG("discarding susedata for **$pkgid**",3);
+        }
+    }
+
+	LOG("re-using data for $number_packages rpms, discarded data for $number_discarded rpms (".($#{$data{'primary_data'}} + 1).")",3);
+
+	for my $current_rpm (keys %stat_all_rpms) {
+        my $short = $current_rpm;
+        $short =~ s/$repodata\/..\///;
+#        next if ( $seen_rpms{$short} );
+#        next if (S_ISLNK($stat_all_rpms{$current_rpm}->mode));
+        next if ( $current_rpm =~ /\.patch\.rpm$/ );
+        next if ( $current_rpm =~ /\.delta\.rpm$/ );
+
+        my $filebase = $current_rpm;
+        $filebase =~ s/^.*\///;
+
+        LOG("adding data for $current_rpm",3);
+
+        my %curpack = GetPackageDataFromRpm($current_rpm);
+		if ($config{'license_file'} && -f "$config{'license_file'}"){
+			my @lic_text=();
+			open (LIC,"< $config{'license_file'}");
+			while (<LIC>){
+				push @lic_text, xml_escape($_);
+			}
+			close(LIC);
+			$curpack{'confirmlic'}=join("\n",@lic_text);
+		}
+        my ($a1,$a2,$a3,$a4) = PackageDataToXML(\%curpack);
+
+        my $package_header = "<package pkgid=\"".$curpack{'checksum_sha'}."\" name=\"".$curpack{'name'}."\" arch=\"".$curpack{'rpmarch'}."\"\>\n";
+        $package_header .= "<version epoch=\"".$curpack{'epoch'}."\" ver=\"".$curpack{'version_only'}."\" rel=\"".$curpack{'release'}."\"/>\n";
+        my $suse_data_entry = $package_header;
+
+		# license to confirm...
+        my $conf_lic = "";
+		if ($curpack{'confirmlic'}){
+            $conf_lic = "      <suse:license-to-confirm>\n".to_xml_utf8($curpack{'confirmlic'})."\n      </suse:license-to-confirm>\n";
+            $suse_data_entry .= "<eula>\n".to_xml_utf8($curpack{'confirmlic'})."\n      </eula>\n";
+            LOG("adding eula to $current_rpm to susedata",5);
+        }
+		# support keywords...
+		my %keyword_data=();
+        if ($config{'keywordfile'}){
+			my $keywords=ReadFileToHash("$config{'keywordfile'}") if ($config{'keywordfile'});
+			%keyword_data=%$keywords;
+			print "$filebase has keyword" if (defined($keyword_data{$filebase}));
+        	if ($keyword_data{$curpack{'name'}}) {
+            	for (@{$keyword_data{$curpack{'name'}}}) {
+                	$suse_data_entry .= "<keyword>".$_."</keyword>\n";
+	            }
+    	    }
+		}
+        push @{$data{'suse_data'}}, "$suse_data_entry</package>";
+        push @{$data{'primary_data'}}, "$a1$a2      <format>\n$a3      </format>\n$conf_lic    </package>";
+        push @{$data{'filelists_data'}}, "$package_header$a4</package>";
+
+        my $other_entry;
+        for (@{$curpack{'changelogtime'}}) {
+            $other_entry .= "<changelog author=\"".to_xml_utf8(@{$curpack{'changelogname'}}[0])."\" date=\"".$_."\">";
+            $other_entry .= to_xml_utf8(@{$curpack{'changelogtext'}}[0])."</changelog>\n";
+            shift @{$curpack{'changelogname'}};
+            shift @{$curpack{'changelogtext'}};
+        }
+        push @{$data{'other_data'}}, "$package_header$other_entry</package>";;
+        $number_packages += 1;
+    }
+} else {
+	writePatchFile(\%config,$repodata,\@package_data);
+	GeneratePatchesXml($repodata);
+}
+
+GenerateRepomdXml($repodata);
+unlink "$repodata/repomd.xml.asc";
+unlink "$repodata/repomd.xml.key";
+
+if ( $config{'do_signing'} ) {
+    if ( $config{'sign_id'} ) {
+		system("gpg -a -b --default-key \"$config{'sign_id'}\" $repodata/repomd.xml");
+    } else {
+		system("gpg -a -b $repodata/repomd.xml");
+		$config{'sign_id'} = `gpg --verify $repodata/repomd.xml.asc 2>&1 | sed -ne "s/.* ID //p"`;
+		chomp ($config{'sign_id'});
+    }
+    system("gpg -a --export \"$config{'sign_id'}\" > $repodata/repomd.xml.key") if ( $config{'sign_id'} );
+}
+
+LOG("Finished creation for $repodata",1);
+close (OUTPUT_LOG);
+cleanup();
+
+#system("//bin/sign -d $patches_directory/repomd.xml");
+#system("cp $patchinfo_lib_dir/public-key $patches_directory/repomd.xml.key");
+
+# Logfile:
+# $Log: createpatch.pl,v $
+# Revision 1.6  2009/04/27 09:02:13  lrupp
+# - enable keywords support
+# - added PackageDataToXML()
+# - use/fillup suse_data primary_data filelists_data
+#
+# Revision 1.5  2009/04/17 15:13:47  lrupp
+# - weekend :-)
+#
+# Revision 1.4  2009/04/17 08:15:28  lrupp
+# - new writePatchFile()
+# - remove validate option: we always produce valid metadata ;-)
+# - add logfile and lockfile
+#
+# Revision 1.3  2009/04/16 16:00:27  lrupp
+# - use %config for all configuration now
+# - be backwarts compatible: allow basedir as argument without option
+# - added configfile option
+#
+# Revision 1.2  2009/04/16 14:09:02  lrupp
+# - use temdir for update_repo
+# - new parsePrimaryXml()
+# - use Getopt for config options
+#
+# Revision 1.1  2009/04/16 13:34:01  lrupp
+# Initial revision
+#
+# Revision 1.5  2007/12/11 13:42:01  lrupp
+# - added "license-to-confirm"
+# - check for createrepo and warn user if not exist
+#
+# Revision 1.4  2007/07/13 08:44:35  lrupp
+# addad @packagelist to condition
+#
+# Revision 1.3  2007/05/15 15:59:21  lrupp
+# beautify usage message
+#
+#

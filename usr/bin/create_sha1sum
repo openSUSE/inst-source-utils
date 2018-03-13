@@ -1,0 +1,136 @@
+#!/bin/bash
+#
+# Copyright (C) 2008 Novell Inc.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the
+# Free Software Foundation, Inc.,
+# 51 Franklin Street,
+# Fifth Floor,
+# Boston, MA  02110-1301,
+# USA.
+#
+# $Id: create_sha1sum 1012 2013-02-17 10:49:03Z lrupp $
+#
+
+function usage (){
+    echo
+    echo "Usage: `basename $0` [--meta] <targetdir>"
+    echo "       --meta : also create MD5SUMS.meta file"
+    echo "       --quiet: don't output anything"
+    echo 
+    echo "       Creates SHA1SUMS files in each subdirectory."
+    echo "       Sometimes useful for debugging inst-source problems ;-)"
+    echo
+    exit $1
+}
+
+function output(){
+	if [ "$QUIET" != "yes" ]; then
+		echo "$1"
+	fi
+}
+
+unset LANGUAGE
+unset LANG
+export LC_ALL=POSIX
+umask 022
+
+CREATE_META=
+QUIET="no"
+CHECKSUM="sha1sum"
+CHECKSUM_F="SHA1SUMS"
+
+while test -n "$1" ; do
+    case $1 in
+	--) shift ; break ;;
+        -h|--help) usage 0 ;;
+	-m|--meta) CREATE_META=1 ; shift ;;
+	-q|--quiet) QUIET="yes" ; shift ;;
+	-2) CHECKSUM="sha256sum" ; CHECKSUM_F="CHECKSUMS" ; shift ;;
+	*) break ;;
+    esac
+done
+if [ -z "$1" ]; then
+  usage 1;
+fi
+
+TMPFILE=$(mktemp /tmp/.create_sha1sums.XXXXXX)
+MYPWD=$(pwd)
+
+for ROOTDIR in "$@" ; do
+    case "$ROOTDIR" in
+	/*) ;;
+	*) ROOTDIR="$MYPWD/$ROOTDIR" ;;
+    esac
+
+    test -d "$ROOTDIR" || {
+        echo "WARNING: $ROOTDIR is not a directory.  Skipping it." >&2
+    }
+
+    find "$ROOTDIR" -type d | while read DIR; do
+        cd "$DIR"
+        unset FILES
+        NFILES=0
+        for FILE in * ; do
+            test -f "$FILE" || continue
+            test -L "$FILE" && continue
+            test -n "$SHA1SUM_SKIPFILES" && {
+                IS_SKIP=false
+		        set -f
+                for i in $SHA1SUM_SKIPFILES ; do
+		          set +f
+		          case "$FILE" in
+			        ($i) IS_SKIP=true
+			        break
+			        ;;
+		          esac
+                done
+		        set +f
+                test $IS_SKIP = true && continue
+            }
+            case "$FILE" in
+              (*.swp|SHA1SUMS*|CHECKSUMS*|MD5SUMS*)
+                continue
+                ;;
+              (*)
+                FILES[$[++NFILES]]="$FILE"
+                ;;
+            esac
+          done
+        if [ $NFILES -eq 0 ]; then
+            rm -f SHA1SUMS* CHECKSUMS*
+        else
+            echo -n > $TMPFILE
+            for FILE in "${FILES[@]}"; do
+	            $CHECKSUM "$FILE" >> $TMPFILE
+            done
+            test -e $CHECKSUM_F || touch $CHECKSUM_F
+	        cmp -s $TMPFILE $CHECKSUM_F || {
+                mv $TMPFILE $CHECKSUM_F
+				chmod 644 $CHECKSUM_F
+                output "INFO:   created $CHECKSUM_F in $DIR"
+	        }
+        if test -n "$CREATE_META"; then
+            test -e $CHECKSUM_F.meta || touch $CHECKSUM_F.meta
+            $CHECKSUM $CHECKSUM_F > $TMPFILE
+            cmp -s $TMPFILE $CHECKSUM_F.meta || {
+		        mv $TMPFILE $CHECKSUM_F.meta
+                chmod 644 $CHECKSUM_F.meta
+                output "INFO:   created $CHECKSUM_F.meta in $DIR"
+            }
+	    fi
+            rm -f $TMPFILE
+        fi
+    done
+done

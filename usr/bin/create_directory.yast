@@ -1,0 +1,77 @@
+#!/bin/bash
+#
+# Copyright (C) 2006 Novell Inc.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the
+# Free Software Foundation, Inc.,
+# 51 Franklin Street,
+# Fifth Floor,
+# Boston, MA  02110-1301,
+# USA.
+#
+# $Id: create_directory.yast,v 1.3 2008/06/25 12:10:43 lrupp Exp lrupp $
+#
+
+FORCE="no"
+
+function usage (){
+    echo
+    echo "Usage: $(basename $0) [-f] <targetdir>"
+    echo
+    echo "       f : force - recreates existing files"
+    echo
+    echo "       Creates the file directory.yast in each subdirectory."
+    echo "       YaST needs this file during Network installation to"
+    echo "       \"see\" the content of the directory if the server"
+    echo "       doesn't support directory listings."
+    echo
+    exit $1
+}
+
+if [ -z "$1" ]; then
+  usage 1;
+fi
+
+while getopts 'fh' OPTION; do
+	case $OPTION in
+		f) FORCE="yes"
+		;;
+		h) usage 1;
+		;;
+	esac
+done
+shift $(( OPTIND - 1 ))
+
+DIR="$1"
+
+test -d "$DIR" || { 
+  echo "ERROR:   directory $DIR not found" >&2
+  usage 1
+}
+
+for i in $(ls "$DIR") ; do
+    case "$i" in
+	  *directory.yast)
+		if [ "$FORCE" != "yes" ]; then
+	    	continue
+		fi
+	  ;;
+    esac
+    if test -d "$DIR/$i" ; then
+		echo "$i/"
+    else
+		echo "$i"
+    fi
+done > "$DIR/directory.yast"
+
