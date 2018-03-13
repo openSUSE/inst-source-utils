@@ -301,6 +301,32 @@ our $susedata = [
 	]],
 ];
 
+our $susedata_i18n = [
+    'susedata' =>
+	'xmlns',
+	'packages',
+	[[ 'package' =>
+	    'pkgid',
+	    'name',
+	    'arch',
+	    [ 'version' =>
+		'epoch',
+		'ver',
+		'rel',
+	    ],
+	    [ 'summary' =>
+		'lang',
+		[],
+		'_content',
+	    ],
+	    [ 'description' =>
+		'lang',
+		[],
+		'_content',
+	    ],
+	]],
+];
+
 our $filelists = [
     'filelists' =>
         'xmlns',
