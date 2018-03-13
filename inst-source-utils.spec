@@ -29,7 +29,7 @@ Obsoletes:      autoyast2-utils <= 2.14.10
 Provides:       autoyast2-utils = 2.14.10
 Recommends:     create-repo-utils
 Requires:       perl-XML-Parser
-Source:         inst-source-utils.tar.bz2
+Source:         %name-%version.tar.xz
 Source1:        split.pl
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
 
@@ -43,16 +43,13 @@ description of each script.
 
 
 %prep
-%setup -n %{name} -q
+%setup -q
 
 %build
 
 %install
 install -d -m 755 %{buildroot}/%{_prefix}
 cp -a * %{buildroot}
-
-%clean
-rm -rf %{buildroot}
 
 %files
 %defattr(755,root,root,755)
