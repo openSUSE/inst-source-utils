@@ -18,9 +18,9 @@
 
 Name:           inst-source-utils
 Summary:        Utilities for creating customized installation sources
-License:        GPL-2.0+
+License:        GPL-2.0-or-later
 Group:          System/YaST
-Version:        2018.2.16
+Version:        2018.04.06
 Release:        0
 Url:            http://en.opensuse.org/Inst-source-utils
 BuildArch:      noarch
@@ -49,9 +49,11 @@ description of each script.
 
 %install
 install -d -m 755 %{buildroot}/%{_prefix}
-cp -a * %{buildroot}
+
+cp -a usr %{buildroot}/
 
 %files
+%doc COPYING
 %defattr(755,root,root,755)
 %_bindir/*
 %defattr(644,root,root,755)
