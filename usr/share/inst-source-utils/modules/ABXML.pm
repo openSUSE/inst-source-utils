@@ -324,6 +324,7 @@ our $susedata_i18n = [
 		[],
 		'_content',
 	    ],
+	    'eula',
 	]],
 ];
 
