@@ -324,6 +324,11 @@ our $susedata_i18n = [
 		[],
 		'_content',
 	    ],
+	    [ 'pattern-category' =>
+		'lang',
+		[],
+		'_content',
+	    ],
 	    'eula',
 	]],
 ];
