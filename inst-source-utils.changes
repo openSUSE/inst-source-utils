@@ -1,4 +1,9 @@
 -------------------------------------------------------------------
+Wed Dec  5 14:55:50 UTC 2018 - Adrian Schröter <adrian@suse.de>
+
+- Add pattern-category (fate#323785)
+
+-------------------------------------------------------------------
 Fri Apr  6 10:02:20 UTC 2018 - adrian@suse.de
 
 - add support for transalted EULA
