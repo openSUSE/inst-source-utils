@@ -286,6 +286,7 @@ our $susedata = [
 		'rel',
 	    ],
 	    'eula',
+	    'pattern-category',
 	    [[ 'keyword' =>
 		'_content',
 	    ]],
