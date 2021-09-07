@@ -56,18 +56,18 @@ my @pactreeCDall = ();
 if ( -d "$current_client/DVD1/$root_on_cd" ) {
     $cds_prim = "$current_client/DVD1";
     for my $i (1...9) {
-	push @pactreeCDall, "$current_client/DVD$i/$root_on_cd" if ( -d "$current_client/DVD$i/$root_on_cd" );
+        push @pactreeCDall, "$current_client/DVD$i/$root_on_cd" if ( -d "$current_client/DVD$i/$root_on_cd" );
     }
 } elsif ( -d "$current_client/CD1/$root_on_cd" ) {
     $cds_prim = "$current_client/CD1";
     for my $i (1...9) {
-	push @pactreeCDall, "$current_client/CD$i/$root_on_cd" if ( -d "$current_client/CD$i/$root_on_cd" );
+        push @pactreeCDall, "$current_client/CD$i/$root_on_cd" if ( -d "$current_client/CD$i/$root_on_cd" );
     }
 } else {
     $cds_prim = "$current_client";
     push @pactreeCDall, "$current_client/$root_on_cd";
 }
-  
+
 my $distro = $ENV{"BBASENAME"};
 $distro = "all" unless ($distro);
 #print "cds_prim is $cds_prim\n";
@@ -91,8 +91,8 @@ sub process_line {
     my $monthnum = $month_to_num{$datarray[2]};
     $actual = timelocal ( 0,0,0,$datarray[3],$monthnum, $datarray[4]-1900);
     if ( $actual < $min_date ) {
-        $skip_rest = 1;
-        next;
+      $skip_rest = 1;
+      next;
     }
     if ( $last_actual ne $actual ) {
        $entries{$actual} .= "\n$announce_string\n";
@@ -151,19 +151,19 @@ for my $myrpm (sort (keys (%allrpms))) {
     # CHANGELOGTIME, CHANGELOGTEXT
     my %c_res = RPMQ::rpmq_many($myfile,1080,1082);
     for my $mytime (@{$c_res{1080} || []}) {
-	  last if ( $mytime < $min_date );
-	  $entries{$mytime} .= "\n$announce_string\n" if ( $lasttime ne $mytime );
-	  $lasttime = $mytime;
-	  for my $myline (split("\n",@{$c_res{1082} || []}[0])) {
-	    $myline =~ s/^\s*(\S*)/$1/;
-	    $myline =~ s/(\S*)\s*$/$1/;
-	    if ( $myline =~ /^-/ ) {
-		    $entries{$mytime} .= "  $myline\n";
-	    } else {
-		    $entries{$mytime} .= "    $myline\n";
-	    }
-	  }
-	  shift @{$c_res{1082} || []};
+      last if ( $mytime < $min_date );
+      $entries{$mytime} .= "\n$announce_string\n" if ( $lasttime ne $mytime );
+      $lasttime = $mytime;
+      for my $myline (split("\n",@{$c_res{1082} || []}[0])) {
+        $myline =~ s/^\s*(\S*)/$1/;
+        $myline =~ s/(\S*)\s*$/$1/;
+        if ( $myline =~ /^-/ ) {
+                $entries{$mytime} .= "  $myline\n";
+        } else {
+                $entries{$mytime} .= "    $myline\n";
+        }
+      }
+      shift @{$c_res{1082} || []};
     }
 }
 #print "\n";
