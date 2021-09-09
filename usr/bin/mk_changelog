@@ -117,7 +117,7 @@ my $findstr .= join(" ",@pactreeCDall);
 my $lasttime = "";
 #print "findstr = $findstr\n";
 my %allrpms = ();
-open ( RPMLIST , "find $findstr -maxdepth 2 -name \"*.rpm\" -print |");
+open ( RPMLIST , "find $findstr -maxdepth 4 -name \"*.rpm\" -print |");
 while ( my $myrpm = <RPMLIST> ) {
     chomp ($myrpm);
     my $basename = $myrpm;
