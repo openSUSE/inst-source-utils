@@ -1,0 +1,121 @@
+#!/usr/bin/perl -w
+use strict;
+
+use Getopt::Long;
+use IO::File;
+use XML::Writer;
+
+my $title = "empty title";
+my $id = "unset";
+my $description = "empty";
+my $severity = "moderate";
+my $type = "recommended";
+my @references = ();
+
+GetOptions (
+	"type=s"	=> \$type,
+	"title=s"	=> \$title,
+	"id=s" 		=> \$id,
+	"severity=s"	=> \$severity,
+	"description=s"	=> \$description,
+	"reference=s"	=> \@references,
+) or die("Error in command line arguments\n");
+
+my %update = ();
+
+my $output = IO::File->new(">output.xml");
+my $writer = XML::Writer->new(OUTPUT => $output, NEWLINES => 1, ENCODING => "utf-8");
+
+#  <update from="maint-coord@suse.de" status="stable" type="recommended" version="1">
+$writer->startTag("update",
+	"from" => "maint-coord\@suse.de",
+	"status" => "stable",
+	"type" => $type,
+	"version" => "1"
+);
+
+#    <id>SUSE-SLE-Module-Basesystem-15-SP4-2022-1864</id>
+$writer->dataElement("id",$id);
+#    <title>Recommended update for leveldb</title>
+$writer->dataElement("title",$title);
+#    <severity>low</severity>
+$writer->dataElement("severity",$severity);
+#    <release>SUSE Updates SLE-Module-Basesystem 15-SP4 x86 64</release>
+$writer->dataElement("release","FILLMEIN");
+
+#    <issued date="1653635267"/>
+$writer->dataElement("issueddate",time);
+
+
+if (@references) {
+	#    <references>
+	$writer->startTag("references");
+	#      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1197742" id="1197742" title="FTBFS: leveldb won't compile on SP4" type="bugzilla"/>
+
+	foreach my $xref (@references) {
+		$writer->startTag("reference",
+			"href" => "https://www.suse.com/security/cve/$xref",
+			"id" => $xref,
+			"title" => "https://www.suse.com/security/cve/$xref",
+			"type" => "cve",
+		);
+		$writer->endTag("reference");
+	}
+	#    </references>
+	$writer->endTag("references");
+}
+
+
+#    <description>This update for leveldb fixes the following issue:
+#- fix tests (bsc#1197742)
+#</description>
+
+
+$writer->dataElement("description",$description);
+
+$writer->startTag("pkglist");
+$writer->startTag("collection");
+#    <pkglist>
+#      <collection>
+
+foreach my $pkg (@ARGV) {
+	my $xpkg = $pkg;
+	my $name = -1;
+	my $version = -1;
+	my $release = -1;
+
+	$xpkg =~ s#.*/##;
+
+	$xpkg =~ /^(.*)-([^-]*)-([^-]*)\.[^.]*\.rpm$/;
+
+	$name = $1;
+	$version = $2;
+	$release = $3;
+
+	$writer->startTag("package",
+		"epoch" => "0",
+		"version" => $version,
+		"release" => $release,
+		"name" => $name,
+		"src" => $pkg,
+	);
+		$writer->dataElement("filename",$xpkg);
+	$writer->endTag("package");
+}
+
+#        <package name="leveldb" epoch="0" version="1.18" release="150000.3.3.1" arch="src" src="src/leveldb-1.18-150000.3.3.1.src.rpm">
+#          <filename>leveldb-1.18-150000.3.3.1.src.rpm</filename>
+#        </package>
+#        <package name="libleveldb1" epoch="0" version="1.18" release="150000.3.3.1" arch="x86_64" src="x86_64/libleveldb1-1.18-150000.3.3.1.x86_64.rpm">
+#          <filename>libleveldb1-1.18-150000.3.3.1.x86_64.rpm</filename>
+#        </package>
+#      </collection>
+#    </pkglist>
+$writer->endTag("collection");
+$writer->endTag("pkglist");
+
+#  </update>
+$writer->endTag("update");
+$writer->end();
+$output->close();
+1;
