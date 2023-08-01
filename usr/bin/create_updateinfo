@@ -19,7 +19,7 @@ GetOptions (
 	"severity=s"	=> \$severity,
 	"description=s"	=> \$description,
 	"reference=s"	=> \@references,
-) or die("Error in command line arguments\n");
+) or die("Error in command line arguments.\nUsage: $0 --type security|recommended --title TITLE --id ID --severity low|moderate|important|critical --description MULTILINETEXT --reference CVE-YEAR-ID LIST-OF-RPMS");
 
 my %update = ();
 
