@@ -53,8 +53,7 @@ install -d -m 755 %{buildroot}/%{_prefix}
 cp -a usr %{buildroot}/
 
 %files
-%doc COPYING
-%defattr(755,root,root,755)
+%license COPYING
 %_bindir/*
 %defattr(644,root,root,755)
 %_datadir/%name
