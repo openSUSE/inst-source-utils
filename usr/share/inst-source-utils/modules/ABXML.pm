@@ -192,6 +192,13 @@ our $repomd =  [
 		'timestamp',
 		'size',
 		'open-size',
+		[ 'header-checksum' =>
+		    'type',
+		    '_content',
+		],
+		[ 'header-size' =>
+		    '_content',
+		],
 		[ 'open-checksum' =>
 		    'type',
 		    '_content',
@@ -542,9 +549,9 @@ our $patch_zypp = [
 				'lang',
 				'_content',
 			],
-			[ 'rpm:requires' => 
+			[ 'rpm:requires' =>
 				'pre',
-				@rpm_entry_2 
+				@rpm_entry_2
 			],
 			[ 'suse:freshens' => @suse_entry ],
 		]],
@@ -564,9 +571,9 @@ our $patch_zypp = [
 				'type',
 				'_content',
 			],
-			[ 'rpm:requires' => 
+			[ 'rpm:requires' =>
 				'pre',
-				@rpm_entry_2 
+				@rpm_entry_2
 			],
 			[ 'suse:freshens' => @suse_entry ],
 		]],
