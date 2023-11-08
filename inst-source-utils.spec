@@ -29,6 +29,7 @@ Obsoletes:      autoyast2-utils <= 2.14.10
 Provides:       autoyast2-utils = 2.14.10
 Recommends:     create-repo-utils
 Requires:       perl-XML-Parser
+Requires:       zstd
 Source:         %name-%version.tar.xz
 Source1:        split.pl
 
