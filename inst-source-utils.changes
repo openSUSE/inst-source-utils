@@ -5,6 +5,12 @@ Wed Nov  8 16:06:01 UTC 2023 - Dirk Müller <dmueller@suse.com>
   - Handle zstd repos in rezip_repo_rsyncable
 
 -------------------------------------------------------------------
+Tue Aug  1 17:55:46 CET 2023 - meissner@suse.de
+
+- added a small perl helper to create updateinfos on your own
+- added some help
+
+-------------------------------------------------------------------
 Wed Apr 27 10:19:51 UTC 2022 - Dirk Müller <dmueller@suse.com>
 
 - fix URL
