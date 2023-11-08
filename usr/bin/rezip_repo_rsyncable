@@ -84,7 +84,10 @@ if ( $rsyncable ) {
     system ("touch", "--reference", "$_", "$_.timestamp");
     system ("zstd", "--rm", "-q", "-d", "-f", $_);
     $_ =~ s/\.zst$//;
-    system ("zstd", "--rm", "-q", "-11", "--rsyncable", "-n", $_);
+    # createrepo_c 1.0.0 sets -9 explicitly. as rsyncable adds
+    # a few bytes, we increase to -10, which adds about 18% runtime
+    # but improves 0.9% the compression - which compensates for rsyncable
+    system ("zstd", "--rm", "-q", "-10", "--rsyncable", "-n", $_);
     system ("touch", "--reference", "$_.zst.timestamp", "$_.zst");
     unlink ("$_.zst.timestamp");
   }
