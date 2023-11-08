@@ -33,8 +33,8 @@ sub GenerateRepomdXml {
       $ctx->addfile(*REC);
       my $newfilechksum = $ctx->hexdigest();
       close (REC);
-      if ($filename =~ /^([^\/]*\/)?[0-9a-f][0-9a-f]*-(.*\.gz)$/) {
-	my $new_filename = "$1$newfilechksum-$2";
+      if ($filename =~ /^([^\/]*\/)?[0-9a-f][0-9a-f]*-(.*)\.(gz|zst)$/) {
+	my $new_filename = "$1$newfilechksum-$2.$3";
 	rename ("$repobase/$filename","$repobase/$new_filename");
 	$filename = $new_filename;
 	$record->{'location'}->{'href'} = $filename;
@@ -79,11 +79,23 @@ unlink ("$tmpdir/fff");
 unlink ("$tmpdir/fff.gz");
 
 if ( $rsyncable ) {
+  my @ZSTDED = glob("$arg/*.zst");
+  for (@ZSTDED) {
+    system ("touch", "--reference", "$_", "$_.timestamp");
+    system ("zstd", "--rm", "-q", "-d", "-f", $_);
+    $_ =~ s/\.zst$//;
+    # createrepo_c 1.0.0 sets -9 explicitly. as rsyncable adds
+    # a few bytes, we increase to -10, which adds about 18% runtime
+    # but improves 0.9% the compression - which compensates for rsyncable
+    system ("zstd", "--rm", "-q", "-10", "--rsyncable", "-n", $_);
+    system ("touch", "--reference", "$_.zst.timestamp", "$_.zst");
+    unlink ("$_.zst.timestamp");
+  }
   my @GZIPPED = glob("$arg/*.gz");
   for (@GZIPPED) {
     system ("touch", "--reference", "$_", "$_.timestamp");
     system ("gunzip", "-f", $_);
-    $_ =~ s/.gz$//;
+    $_ =~ s/\.gz$//;
     system ("gzip", "-9", "-n", $rsyncable, $_);
     system ("touch", "--reference", "$_.gz.timestamp", "$_.gz");
     unlink ("$_.gz.timestamp");
