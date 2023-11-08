@@ -20,9 +20,9 @@ Name:           inst-source-utils
 Summary:        Utilities for creating customized installation sources
 License:        GPL-2.0-or-later
 Group:          System/YaST
-Version:        2018.04.06
+Version:        2023.11.08
 Release:        0
-Url:            http://en.opensuse.org/Inst-source-utils
+Url:            https://en.opensuse.org/Inst-source-utils
 BuildArch:      noarch
 Requires:       gpg2
 Obsoletes:      autoyast2-utils <= 2.14.10
@@ -31,7 +31,6 @@ Recommends:     create-repo-utils
 Requires:       perl-XML-Parser
 Source:         %name-%version.tar.xz
 Source1:        split.pl
-BuildRoot:      %{_tmppath}/%{name}-%{version}-build
 
 %description
 Utilities supporting autoinstallation and creation of customized
